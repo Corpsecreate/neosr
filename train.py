@@ -258,6 +258,7 @@ def train_pipeline(root_path):
                         #"data_time": data_timer.get_avg_time(),
                     })
                     log_vars.update(model.get_current_log())
+                    model.reset_current_log()
                     msg_logger(log_vars)
 
                 # save models and training states

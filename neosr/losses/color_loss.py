@@ -51,4 +51,4 @@ class colorloss(nn.Module):
             input_uv = torch.nn.AvgPool2d(kernel_size=int(self.scale))(input_uv)
             target_uv = torch.nn.AvgPool2d(kernel_size=int(self.scale))(target_uv)
 
-        return self.criterion(input_uv, target_uv) * self.loss_weight
+        return self.criterion(input_uv, target_uv)

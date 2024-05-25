@@ -52,9 +52,7 @@ class L1Loss(nn.Module):
             target (Tensor): of shape (N, C, H, W). Ground truth tensor.
             weight (Tensor, optional): of shape (N, C, H, W). Element-wise weights. Default: None.
         """
-        return self.loss_weight * l1_loss(
-            pred, target, weight, reduction=self.reduction
-        )
+        return l1_loss(pred, target, weight, reduction=self.reduction)
 
 
 @LOSS_REGISTRY.register()
@@ -84,9 +82,7 @@ class MSELoss(nn.Module):
             target (Tensor): of shape (N, C, H, W). Ground truth tensor.
             weight (Tensor, optional): of shape (N, C, H, W). Element-wise weights. Default: None.
         """
-        return self.loss_weight * mse_loss(
-            pred, target, weight, reduction=self.reduction
-        )
+        return mse_loss(pred, target, weight, reduction=self.reduction)
 
 
 @LOSS_REGISTRY.register()
@@ -124,9 +120,7 @@ class HuberLoss(nn.Module):
             weight (Tensor, optional): of shape (N, C, H, W). Element-wise weights. Default: None.
         """
 
-        return self.loss_weight * huber_loss(
-            pred, target, weight, delta=self.delta, reduction=self.reduction
-        )
+        return huber_loss(pred, target, weight, delta=self.delta, reduction=self.reduction)
 
 
 @LOSS_REGISTRY.register()
@@ -210,4 +204,4 @@ class chc(nn.Module):
         else:
             raise NotImplementedError(f"{self.criterion} not implemented.")
 
-        return self.loss_weight * loss
+        return loss

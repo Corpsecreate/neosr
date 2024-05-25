@@ -143,4 +143,4 @@ class focalfrequencyloss(nn.Module):
             target_freq = torch.mean(target_freq, 0, keepdim=True)
 
         # calculate focal frequency loss
-        return self.loss_formulation(pred_freq, target_freq, matrix) * self.loss_weight
+        return self.loss_formulation(pred_freq, target_freq, matrix)

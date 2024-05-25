@@ -147,7 +147,6 @@ class dists(nn.Module):
 
         if self.as_loss:
             out = 1 - (dist1 + dist2).mean()
-            out *= self.loss_weight
         else:
             out = 1 - (dist1 + dist2).squeeze()
 

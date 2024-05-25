@@ -1,9 +1,11 @@
 import os
 import time
+import random
 from collections import OrderedDict
 from copy import deepcopy
 from os import path as osp
 
+import numpy as np
 import torch
 import pytorch_optimizer
 from tqdm import tqdm
@@ -28,9 +30,10 @@ class default():
     """Default model."""
 
     def __init__(self, opt):
-        self.opt = opt
-        self.device = torch.device('cuda')
-        self.is_train = opt['is_train']
+    
+        self.opt        = opt
+        self.device     = torch.device('cuda')
+        self.is_train   = opt['is_train']
         self.optimizers = []
         self.schedulers = []
 
@@ -69,11 +72,37 @@ class default():
 
         # options var
         train_opt = self.opt['train']
+        self.loss_alpha = 0.9990
+        self.loss_emas  = {}
+        self.live_emas  = {}
+        self.log_dict   = {}
 
         # set nets to training mode
         self.net_g.train()
-        if self.net_d is not None:
+        if self.opt.get('network_d', None) is not None:
             self.net_d.train()
+        
+        self.net_d_iters      = train_opt.get('net_d_iters', 1)
+        self.net_d_init_iters = train_opt.get('net_d_init_iters', 0)
+        
+        # set up optimizers and schedulers
+        self.setup_optimizers()
+        self.setup_schedulers()
+        self.optim_to_sched = {s.optimizer : s for s in self.schedulers}
+        self.sched_to_optim = {s : s.optimizer for s in self.schedulers}
+
+        self.grad_updates = 0
+        self.loss_samples = 0
+        self.scaler_g     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**5)
+        self.scaler_d     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**5)
+        self.accum_loss_g = 0.0
+        self.accum_loss_d = 0.0
+           
+        # initialise counter of how many batches has to be accumulated
+        self.accum_count = 0
+        self.accum_limit = self.opt["datasets"]["train"].get("accumulate", 1) 
+        if self.accum_limit is None or self.accum_limit <= 0:
+            self.accum_limit = 1
 
         # scale ratio var
         self.scale = self.opt['scale'] 
@@ -85,22 +114,15 @@ class default():
             self.gt_size = self.opt["datasets"]["train"].get("gt_size")
 
         # augmentations
-        self.aug = self.opt["datasets"]["train"].get("augmentation", None)
+        self.aug      = self.opt["datasets"]["train"].get("augmentation", None)
         self.aug_prob = self.opt["datasets"]["train"].get("aug_prob", None)
             
         # for amp
-        self.use_amp = self.opt.get('use_amp', False) is True
+        self.use_amp   = self.opt.get('use_amp', False) is True
         self.amp_dtype = torch.bfloat16 if self.opt.get('bfloat16', False) is True else torch.float16
-        self.gradscaler = torch.cuda.amp.GradScaler(enabled = self.use_amp, init_scale=2.**5)
 
         # LQ matching for Color/Luma losses
         self.match_lq = self.opt['train'].get('match_lq', False)
-        
-        # initialise counter of how many batches has to be accumulated
-        self.n_accumulated = 0
-        self.accum_iters = self.opt["datasets"]["train"].get("accumulate", 1) 
-        if self.accum_iters == 0 or self.accum_iters == None:
-            self.accum_ters = 1
 
         # define losses
         if train_opt.get('pixel_opt'):
@@ -114,14 +136,12 @@ class default():
             self.cri_mssim = None
 
         if train_opt.get('perceptual_opt'):
-            self.cri_perceptual = build_loss(
-                train_opt['perceptual_opt']).to(self.device, memory_format=torch.channels_last, non_blocking=True)
+            self.cri_perceptual = build_loss(train_opt['perceptual_opt']).to(self.device, memory_format=torch.channels_last, non_blocking=True)
         else:
             self.cri_perceptual = None
 
         if train_opt.get('dists_opt'):
-            self.cri_dists = build_loss(
-                train_opt['dists_opt']).to(self.device, memory_format=torch.channels_last, non_blocking=True)
+            self.cri_dists = build_loss(train_opt['dists_opt']).to(self.device, memory_format=torch.channels_last, non_blocking=True)
         else:
             self.cri_dists = None
 
@@ -166,7 +186,7 @@ class default():
         if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
             logger = get_root_logger()
             logger.info('Loss [Wavelet-Guided] enabled.')
-            self.wg_pw = train_opt.get("wg_pw", 0.01)
+            self.wg_pw    = train_opt.get("wg_pw", 0.01)
             self.wg_pw_lh = train_opt.get("wg_pw_lh", 0.01)
             self.wg_pw_hl = train_opt.get("wg_pw_hl", 0.01)
             self.wg_pw_hh = train_opt.get("wg_pw_hh", 0.05)
@@ -175,8 +195,8 @@ class default():
         self.gradclip = self.opt["train"].get("grad_clip", True)
 
         # error handling
-        optim_d = self.opt["train"].get("optim_d", None)
-        pix_losses_bool = self.cri_pix or self.cri_mssim is not None
+        optim_d            = self.opt["train"].get("optim_d", None)
+        pix_losses_bool    = self.cri_pix or self.cri_mssim is not None
         percep_losses_bool = self.cri_perceptual or self.cri_dists is not None
 
         if pix_losses_bool is False and percep_losses_bool is False:
@@ -201,26 +221,28 @@ class default():
             msg = "The gt_size value must be a multiple of 4. Please change it."
             raise ValueError(msg)
 
-        self.net_d_iters = train_opt.get('net_d_iters', 1)
-        self.net_d_init_iters = train_opt.get('net_d_init_iters', 0)
-
-        # set up optimizers and schedulers
-        self.setup_optimizers()
-        self.setup_schedulers()
-
     def get_optimizer(self, optim_type, params, lr, **kwargs):
-        if optim_type in {'Adam', 'adam'}:
-            optimizer = torch.optim.Adam(params, lr, **kwargs)
-        elif optim_type in {'AdamW', 'adamw'}:
-            optimizer = torch.optim.AdamW(params, lr, **kwargs)
-        elif optim_type in {'NAdam', 'nadam'}:
-            optimizer = torch.optim.NAdam(params, lr, **kwargs)
-        elif optim_type in {'Adan', 'adan'}:
-            optimizer = pytorch_optimizer.Adan(params, lr, **kwargs)
-        elif optim_type in {'Lamb', 'lamb'}:
-            optimizer = pytorch_optimizer.Lamb(params, lr, **kwargs)
-        elif optim_type in {'Lion', 'lion'}:
-            optimizer = pytorch_optimizer.Lion(params, lr, **kwargs)
+        # uppercase optim_type to make it case insensitive
+        optim_type_upper = optim_type.upper()
+        optim_map = {"ADADELTA"   : torch.optim.Adadelta,
+                     "ADAGRAD"    : torch.optim.Adagrad,
+                     "ADAM"       : torch.optim.Adam,
+                     "ADAMW"      : torch.optim.AdamW,
+                     "SPARSEADAM" : torch.optim.SparseAdam,
+                     "ADAMAX"     : torch.optim.Adamax,
+                     "ASGD"       : torch.optim.ASGD,
+                     "SGD"        : torch.optim.SGD,
+                     "RADAM"      : torch.optim.RAdam,
+                     "RPROP"      : torch.optim.Rprop,
+                     "RMSPROP"    : torch.optim.RMSprop,
+                     "NADAM"      : torch.optim.NAdam,
+                     "LBFGS"      : torch.optim.LBFGS,
+                     "ADAN"       : pytorch_optimizer.Adan,
+                     "LAMB"       : pytorch_optimizer.Lamb,
+                     "LION"       : pytorch_optimizer.Lion,
+                    }
+        if optim_type_upper in optim_map:
+            optimizer = optim_map[optim_type_upper](params, lr, **kwargs)
         else:
             raise NotImplementedError(
                 f'optimizer {optim_type} is not supported yet.')
@@ -241,7 +263,7 @@ class default():
             optim_type, optim_params, **train_opt['optim_g'])
         self.optimizers.append(self.optimizer_g)
         # optimizer d
-        if self.net_d is not None:
+        if self.opt.get('network_d', None) is not None:
             optim_type = train_opt['optim_d'].pop('type')
             self.optimizer_d = self.get_optimizer(
                 optim_type, self.net_d.parameters(), **train_opt['optim_d'])
@@ -251,15 +273,27 @@ class default():
         """Set up schedulers."""
         train_opt = self.opt['train']
         scheduler_type = train_opt['scheduler'].pop('type')
-
-        if scheduler_type in {'MultiStepLR', 'multisteplr'}:
+        # uppercase scheduler_type to make it case insensitive
+        sch_typ_upper = scheduler_type.upper()
+        sch_map = {"CONSTANTLR"        : torch.optim.lr_scheduler.ConstantLR,
+                   "LINEARLR"          : torch.optim.lr_scheduler.LinearLR,
+                   "EXPONENTIALLR"     : torch.optim.lr_scheduler.ExponentialLR,
+                   "CYCLICLR"          : torch.optim.lr_scheduler.CyclicLR,
+                   "STEPLR"            : torch.optim.lr_scheduler.StepLR,
+                   "MULTISTEPLR"       : torch.optim.lr_scheduler.MultiStepLR,
+                   "LAMBDALR"          : torch.optim.lr_scheduler.LambdaLR,
+                   "MULTIPLICATIVELR"  : torch.optim.lr_scheduler.MultiplicativeLR,
+                   "SEQUENTIALLR"      : torch.optim.lr_scheduler.SequentialLR,
+                   "CHAINEDSCHEDULER"  : torch.optim.lr_scheduler.ChainedScheduler,
+                   "ONECYCLELR"        : torch.optim.lr_scheduler.OneCycleLR,
+                   "POLYNOMIALLR"      : torch.optim.lr_scheduler.PolynomialLR,
+                   "CAWR"              : torch.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+                   "COSINEANNEALING"   : torch.optim.lr_scheduler.CosineAnnealingLR,
+                   "REDUCELRONPLATEAU" : torch.optim.lr_scheduler.ReduceLROnPlateau,
+                  }
+        if sch_typ_upper in sch_map:
             for optimizer in self.optimizers:
-                self.schedulers.append(torch.optim.lr_scheduler.MultiStepLR(
-                    optimizer, **train_opt['scheduler']))
-        elif scheduler_type in {'CosineAnnealing', 'cosineannealing'}:
-            for optimizer in self.optimizers:
-                self.schedulers.append(torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, **train_opt['scheduler']))
+                self.schedulers.append(sch_map[sch_typ_upper](optimizer, **train_opt['scheduler']))
         else:
             raise NotImplementedError(
                 f'Scheduler {scheduler_type} is not implemented yet.')
@@ -269,8 +303,7 @@ class default():
         """
         init_lr_groups_l = []
         for optimizer in self.optimizers:
-            init_lr_groups_l.append([v['initial_lr']
-                                    for v in optimizer.param_groups])
+            init_lr_groups_l.append([v['initial_lr'] for v in optimizer.param_groups])
         return init_lr_groups_l
 
     def get_current_learning_rate(self):
@@ -291,13 +324,19 @@ class default():
         if self.net_d is not None:
             for p in self.net_d.parameters():
                 p.requires_grad = False
-
-        # increment accumulation counter
-        self.n_accumulated += 1
-        # reset accumulation counter
-        if self.n_accumulated >= self.accum_iters:
-            self.n_accumulated = 0
-
+            
+        n_samples = self.gt.shape[0]
+        self.loss_samples += n_samples
+        # increment accumulation counter and check if accumulation limit has been reached
+        self.accum_count += 1
+        accum_reached     = self.accum_count >= self.accum_limit
+        
+        # list of loss functions to apply backward() on
+        back_losses_g = {}
+        
+        ##########################
+        # GENERATOR
+        ##########################
         with torch.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
 
             self.output = self.net_g(self.lq)
@@ -319,148 +358,200 @@ class default():
                     combined_HF_gt,
                 ) = wavelet_guided(self.output, self.gt)
 
-            l_g_total = 0
+            l_g_total = 0.0
             loss_dict = OrderedDict()
 
-            if (current_iter % self.net_d_iters == 0 and current_iter > self.net_d_init_iters):
+            if (current_iter > self.net_d_init_iters and current_iter % self.net_d_iters == 0):
+            
                 # pixel loss
-                if self.cri_pix:
+                if self.cri_pix and self.cri_pix.loss_weight != 0:
                     if self.wavelet_guided == "on":
-                        l_g_pix = self.wg_pw * self.cri_pix(LL, LL_gt)
+                        l_g_pix    = self.wg_pw    * self.cri_pix(LL, LL_gt)
                         l_g_pix_lh = self.wg_pw_lh * self.cri_pix(LH, LH_gt)
                         l_g_pix_hl = self.wg_pw_hl * self.cri_pix(HL, HL_gt)
                         l_g_pix_hh = self.wg_pw_hh * self.cri_pix(HH, HH_gt)
-                        l_g_total = l_g_total + l_g_pix + l_g_pix_lh + l_g_pix_hl + l_g_pix_hh
+                        loss_pix   = (l_g_pix + l_g_pix_lh + l_g_pix_hl + l_g_pix_hh)
                     else:
-                        l_g_pix = self.cri_pix(self.output, self.gt)
-                        l_g_total += l_g_pix
-                    loss_dict['l_g_pix'] = l_g_pix
+                        loss_pix = self.cri_pix(self.output, self.gt)
+                    
+                    self.loss_emas['l_g_pix'] = (self.loss_alpha * self.loss_emas.get('l_g_pix', loss_pix.item())) + (1 - self.loss_alpha) * loss_pix.item()
+                    sf                        = 1 / abs(self.live_emas.get('l_g_pix', self.loss_emas['l_g_pix']))
+                    l_g_total               += (loss_pix * self.cri_pix.loss_weight) * sf
+                    back_losses_g['l_g_pix'] = (loss_pix * self.cri_pix.loss_weight) * sf
+                    loss_dict['l_g_pix']     = loss_pix
+                    
                 # ssim loss
-                if self.cri_mssim:
+                if self.cri_mssim and self.cri_mssim.loss_weight != 0:
                     if self.wavelet_guided == "on":
-                        l_g_mssim = self.wg_pw * self.cri_mssim(LL, LL_gt)
+                        l_g_mssim    = self.wg_pw    * self.cri_mssim(LL, LL_gt)
                         l_g_mssim_lh = self.wg_pw_lh * self.cri_mssim(LH, LH_gt)
                         l_g_mssim_hl = self.wg_pw_hl * self.cri_mssim(HL, HL_gt)
                         l_g_mssim_hh = self.wg_pw_hh * self.cri_mssim(HH, HH_gt)
-                        l_g_total = l_g_total + l_g_mssim + l_g_mssim_lh + l_g_mssim_hl + l_g_mssim_hh
+                        loss_mssim   = (l_g_mssim + l_g_mssim_lh + l_g_mssim_hl + l_g_mssim_hh)
                     else:
-                        l_g_mssim = self.cri_mssim(self.output, self.gt)
-                        l_g_total += l_g_mssim
-                    loss_dict['l_g_mssim'] = l_g_mssim
+                        loss_mssim = self.cri_mssim(self.output, self.gt)
+                        
+                    self.loss_emas['l_g_mssim'] = (self.loss_alpha * self.loss_emas.get('l_g_mssim', loss_mssim.item())) + (1 - self.loss_alpha) * loss_mssim.item()
+                    sf                         = 1 / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
+                    l_g_total                 += (loss_mssim * self.cri_mssim.loss_weight) * sf
+                    back_losses_g['l_g_mssim'] = (loss_mssim * self.cri_mssim.loss_weight) * sf
+                    loss_dict['l_g_mssim']     = loss_mssim
+                    
                 # perceptual loss
-                if self.cri_perceptual:
-                    l_g_percep = self.cri_perceptual(self.output, self.gt)
-                    l_g_total += l_g_percep
-                    loss_dict['l_g_percep'] = l_g_percep
+                if self.cri_perceptual and self.cri_perceptual.perceptual_weight != 0:
+                    l_g_percep                  = self.cri_perceptual(self.output, self.gt)
+                    self.loss_emas['l_g_percep'] = (self.loss_alpha * self.loss_emas.get('l_g_percep', l_g_percep.item())) + (1 - self.loss_alpha) * l_g_percep.item()
+                    sf                          = 1 / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
+                    l_g_total                  += (l_g_percep * self.cri_perceptual.perceptual_weight) * sf
+                    back_losses_g['l_g_percep'] = (l_g_percep * self.cri_perceptual.perceptual_weight) * sf
+                    loss_dict['l_g_percep']     = l_g_percep
+                    
                 # dists loss
-                if self.cri_dists:
-                    l_g_dists = self.cri_dists(self.output, self.gt)
-                    l_g_total += l_g_dists
-                    loss_dict['l_g_dists'] = l_g_dists
+                if self.cri_dists and self.cri_dists.loss_weight != 0:
+                    l_g_dists                  = self.cri_dists(self.output, self.gt)
+                    self.loss_emas['l_g_dists'] = (self.loss_alpha * self.loss_emas.get('l_g_dists', l_g_dists.item())) + (1 - self.loss_alpha) * l_g_dists.item()
+                    sf                         = 1 / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
+                    l_g_total                 += (l_g_dists * self.cri_dists.loss_weight) * sf
+                    back_losses_g['l_g_dists'] = (l_g_dists * self.cri_dists.loss_weight) * sf
+                    loss_dict['l_g_dists']     = l_g_dists
+                    
                 # ldl loss
-                if self.cri_ldl:
-                    pixel_weight = get_refined_artifact_map(self.gt, self.output, 7)
-                    l_g_ldl = self.cri_ldl(
-                        torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
-                    l_g_total += l_g_ldl
-                    loss_dict['l_g_ldl'] = l_g_ldl
+                if self.cri_ldl and self.cri_ldl.loss_weight != 0:
+                    pixel_weight             = get_refined_artifact_map(self.gt, self.output, 7)
+                    l_g_ldl                  = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
+                    self.loss_emas['l_g_ldl'] = (self.loss_alpha * self.loss_emas.get('l_g_ldl', l_g_ldl.item())) + (1 - self.loss_alpha) * l_g_ldl.item()
+                    sf                       = 1 / abs(self.live_emas.get('l_g_ldl', self.loss_emas['l_g_ldl']))
+                    l_g_total               += (l_g_ldl * self.cri_ldl.loss_weight) * sf
+                    back_losses_g['l_g_ldl'] = (l_g_ldl * self.cri_ldl.loss_weight) * sf
+                    loss_dict['l_g_ldl']     = l_g_ldl
+                    
                 # focal frequency loss
-                if self.cri_ff:
-                    l_g_ff = self.cri_ff(self.output, self.gt)
-                    l_g_total += l_g_ff
-                    loss_dict['l_g_ff'] = l_g_ff
+                if self.cri_ff and self.cri_ff.loss_weight != 0:
+                    l_g_ff                  = self.cri_ff(self.output, self.gt)
+                    self.loss_emas['l_g_ff'] = (self.loss_alpha * self.loss_emas.get('l_g_ff', l_g_ff.item())) + (1 - self.loss_alpha) * l_g_ff.item()
+                    sf                      = 1 / abs(self.live_emas.get('l_g_ff', self.loss_emas['l_g_ff']))
+                    l_g_total              += (l_g_ff * self.cri_ff.loss_weight) * sf
+                    back_losses_g['l_g_ff'] = (l_g_ff * self.cri_ff.loss_weight) * sf
+                    loss_dict['l_g_ff']     = l_g_ff
+                    
                 # gradient-weighted loss
-                if self.cri_gw:
-                    l_g_gw = self.cri_gw(self.output, self.gt)
-                    l_g_total += l_g_gw
-                    loss_dict['l_g_gw'] = l_g_gw
+                if self.cri_gw and self.cri_gw.loss_weight != 0:
+                    l_g_gw                  = self.cri_gw(self.output, self.gt)
+                    self.loss_emas['l_g_gw'] = (self.loss_alpha * self.loss_emas.get('l_g_gw', l_g_gw.item())) + (1 - self.loss_alpha) * l_g_gw.item()
+                    sf                      = 1 / abs(self.live_emas.get('l_g_gw', self.loss_emas['l_g_gw']))
+                    l_g_total              += (l_g_gw * self.cri_gw.loss_weight) * sf
+                    back_losses_g['l_g_gw'] = (l_g_gw * self.cri_gw.loss_weight) * sf
+                    loss_dict['l_g_gw']     = l_g_gw
+                    
                 # color loss
-                if self.cri_color:
-                    if self.match_lq:
-                        l_g_color = self.cri_color(self.output, self.lq_interp)
-                    else:
-                        l_g_color = self.cri_color(self.output, self.gt)
-                    l_g_total += l_g_color
-                    loss_dict['l_g_color'] = l_g_color
+                if self.cri_color and self.cri_color.loss_weight != 0:
+                    l_g_color                  = self.cri_color(self.output, self.lq_interp if self.match_lq else self.gt)
+                    self.loss_emas['l_g_color'] = (self.loss_alpha * self.loss_emas.get('l_g_color', l_g_color.item())) + (1 - self.loss_alpha) * l_g_color.item()
+                    sf                         = 1 / abs(self.live_emas.get('l_g_color', self.loss_emas['l_g_color']))
+                    l_g_total                 += (l_g_color * self.cri_color.loss_weight) * sf
+                    back_losses_g['l_g_color'] = (l_g_color * self.cri_color.loss_weight) * sf
+                    loss_dict['l_g_color']     = l_g_color
+                    
                 # luma loss
-                if self.cri_luma:
-                    if self.match_lq:
-                        l_g_luma = self.cri_luma(self.output, self.lq_interp)
-                    else:
-                        l_g_luma = self.cri_luma(self.output, self.gt)
-                    l_g_total += l_g_luma
-                    loss_dict['l_g_luma'] = l_g_luma
+                if self.cri_luma and self.cri_luma.loss_weight != 0:
+                    l_g_luma                  = self.cri_luma(self.output, self.lq_interp if self.match_lq else self.gt)
+                    self.loss_emas['l_g_luma'] = (self.loss_alpha * self.loss_emas.get('l_g_luma', l_g_luma.item())) + (1 - self.loss_alpha) * l_g_luma.item()
+                    sf                        = 1 / abs(self.live_emas.get('l_g_luma', self.loss_emas['l_g_luma']))
+                    l_g_total                += (l_g_luma * self.cri_luma.loss_weight) * sf
+                    back_losses_g['l_g_luma'] = (l_g_luma * self.cri_luma.loss_weight) * sf
+                    loss_dict['l_g_luma']     = l_g_luma
+                    
                 # GAN loss
-                if self.cri_gan:
-                    fake_g_pred = self.net_d(self.output)
-                    l_g_gan = self.cri_gan(fake_g_pred, True, is_disc=False)
-                    l_g_total += l_g_gan
-                    loss_dict['l_g_gan'] = l_g_gan
-
+                if self.cri_gan and self.cri_gan.loss_weight != 0:
+                    fake_g_pred              = self.net_d(self.output)
+                    l_g_gan                  = self.cri_gan(fake_g_pred, True, is_disc=False)
+                    self.loss_emas['l_g_gan'] = (self.loss_alpha * self.loss_emas.get('l_g_gan', l_g_gan.item())) + (1 - self.loss_alpha) * l_g_gan.item()
+                    sf                       = 1 / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
+                    l_g_total               += (l_g_gan * self.cri_gan.loss_weight) * sf
+                    back_losses_g['l_g_gan'] = (l_g_gan * self.cri_gan.loss_weight) * sf
+                    loss_dict['l_g_gan']     = l_g_gan
+        
+        for i, (_, loss) in enumerate(back_losses_g.items()):
+            is_last_loss = i == len(back_losses_g) - 1
+            self.scaler_g.scale(loss / self.accum_limit).backward(retain_graph = not is_last_loss)
+            
         # add total generator loss for tensorboard tracking
         loss_dict['l_g_total'] = l_g_total
-                   
-        # divide losses by accumulation factor
-        l_g_total = l_g_total / self.accum_iters
-        self.gradscaler.scale(l_g_total).backward()
+        self.accum_loss_g     += loss_dict['l_g_total'].item() / self.accum_limit
 
-        if (self.n_accumulated) % self.accum_iters == 0:
-            # gradient clipping on generator
-            if self.gradclip:
-                self.gradscaler.unscale_(self.optimizer_g)
-                torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 1.0, error_if_nonfinite=False)
-
-            self.gradscaler.step(self.optimizer_g)
-
+        ##########################
+        # DISCRIMINATOR
+        ##########################
         # optimize net_d
-        if self.net_d is not None:
+        has_net_d = self.net_d is not None and self.cri_gan and self.cri_gan.loss_weight != 0
+        if has_net_d:
+        
             for p in self.net_d.parameters():
                 p.requires_grad = True
 
             with torch.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
 
-                if self.cri_gan:
                 # real
-                    if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
-                        real_d_pred = self.net_d(combined_HF_gt)
-                    else:
-                        real_d_pred = self.net_d(self.gt)
-                    l_d_real = self.cri_gan(real_d_pred, True, is_disc=True)
-                    loss_dict['l_d_real'] = l_d_real
-                    loss_dict['out_d_real'] = torch.mean(real_d_pred.detach())
+                if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
+                    real_d_pred = self.net_d(combined_HF_gt)
+                else:
+                    real_d_pred = self.net_d(self.gt)
+                    
+                l_d_real                = self.cri_gan(real_d_pred, True, is_disc=True)
+                loss_dict['l_d_real']   = l_d_real
+                loss_dict['out_d_real'] = torch.mean(real_d_pred.detach())
+                
                 # fake
-                    if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
-                        fake_d_pred = self.net_d(combined_HF.detach().clone())
-                    else:
-                        fake_d_pred = self.net_d(self.output.detach().clone())
-                    l_d_fake = self.cri_gan(fake_d_pred, False, is_disc=True)
-                    loss_dict['l_d_fake'] = l_d_fake
-                    loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())
+                if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
+                    fake_d_pred = self.net_d(combined_HF.detach().clone())
+                else:
+                    fake_d_pred = self.net_d(self.output.detach().clone())
+                    
+                l_d_fake                = self.cri_gan(fake_d_pred, False, is_disc=True)
+                loss_dict['l_d_fake']   = l_d_fake
+                loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())
 
-            if self.cri_gan:
-                l_d_real = l_d_real / self.accum_iters
-                l_d_fake = l_d_fake / self.accum_iters
-                self.gradscaler.scale(l_d_real).backward()
-                self.gradscaler.scale(l_d_fake).backward()
-
-            # clip and step() discriminator
-            if (self.n_accumulated) % self.accum_iters == 0:
-                # gradient clipping on discriminator
-                if self.gradclip:
-                    self.gradscaler.unscale_(self.optimizer_d)
-                    torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1.0, error_if_nonfinite=False)
-
-                self.gradscaler.step(self.optimizer_d)
+            # Compute gradients
+            self.scaler_d.scale(l_d_real / self.accum_limit).backward(retain_graph=True)
+            self.scaler_d.scale(l_d_fake / self.accum_limit).backward(retain_graph=False)
 
             # add total discriminator loss for tensorboard tracking
             loss_dict['l_d_total'] = (l_d_real + l_d_fake) / 2
-
-        # update gradscaler and zero grads
-        if (self.n_accumulated) % self.accum_iters == 0:
-            self.gradscaler.update()
+            self.accum_loss_d     += loss_dict['l_d_total'] / self.accum_limit
+                
+        if accum_reached:
+            self.accum_count   = 0
+            self.grad_updates += 1
+            
+            if self.grad_updates > 0 and self.grad_updates % 100 == 0:
+                print("="*80)
+                for x, y in self.loss_emas.items():
+                    print("{:<16}{:<16.5f}{:<16.5f}".format(x, self.live_emas.get(x, 0), y))
+            
+            self.live_emas = {k : v for k, v in self.loss_emas.items()}
+            
+            # Generator
+            # gradient clipping on generator
+            if self.gradclip:
+                self.scaler_g.unscale_(self.optimizer_g)
+                torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 1.0, error_if_nonfinite=False)
+            self.scaler_g.step(self.optimizer_g)
+            self.scaler_g.update()
             self.optimizer_g.zero_grad(set_to_none=True)
-            if self.net_d is not None:
+            self.optim_to_sched[self.optimizer_g].step()
+            self.accum_loss_g = 0.0
+            
+            if has_net_d:
+                # Discriminator
+                # gradient clipping on discriminator
+                if self.gradclip:
+                    self.scaler_d.unscale_(self.optimizer_d)
+                    torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1.0, error_if_nonfinite=False)
+                self.scaler_d.step(self.optimizer_d)
+                self.scaler_d.update()
                 self.optimizer_d.zero_grad(set_to_none=True)
+                self.optim_to_sched[self.optimizer_d].step()
+                self.accum_loss_d = 0.0
 
         # error if NaN
         if torch.isnan(l_g_total):
@@ -470,8 +561,11 @@ class default():
                   https://github.com/muslll/neosr/wiki/Configuration-Walkthrough
                   """
             raise ValueError(msg)
-
-        self.log_dict = self.reduce_loss_dict(loss_dict)
+            
+        #self.log_dict = self.reduce_loss_dict(loss_dict)
+                
+        for key in loss_dict:
+            self.log_dict[key] = self.log_dict.get(key, 0) + loss_dict[key].item() * n_samples
 
 
     def update_learning_rate(self, current_iter, warmup_iter=-1):
@@ -482,9 +576,7 @@ class default():
             warmup_iter (int)： Warm-up iter numbers. -1 for no warm-up.
                 Default： -1.
         """
-        if current_iter > 0 and self.n_accumulated == 0:
-            for scheduler in self.schedulers:
-                scheduler.step()
+
         # set up warm-up learning rate
         if current_iter < warmup_iter:
             # get initial lr for each group
@@ -493,8 +585,7 @@ class default():
             # currently only support linearly warm up
             warm_up_lr_l = []
             for init_lr_g in init_lr_g_l:
-                warm_up_lr_l.append(
-                    [v / warmup_iter * current_iter for v in init_lr_g])
+                warm_up_lr_l.append([v / warmup_iter * current_iter for v in init_lr_g])
             # set learning rate
             self._set_lr(warm_up_lr_l)
 
@@ -707,9 +798,9 @@ class default():
     def _log_validation_metric_values(self, current_iter, dataset_name, tb_logger):
         log_str = f'Validation {dataset_name}\n\n'
         for metric, value in self.metric_results.items():
-            log_str += f'\t # {metric}: {value:.4f}'
+            log_str += f'\t # {metric+":":<8} {value:.4f}'
             if hasattr(self, 'best_metric_results'):
-                log_str += (f'........ Best: {self.best_metric_results[dataset_name][metric]["val"]:.4f} @ '
+                log_str += (f'......Best: {self.best_metric_results[dataset_name][metric]["val"]:>8.4f} @ '
                             f'{self.best_metric_results[dataset_name][metric]["iter"]} iter')
             log_str += '\n'
 
@@ -744,7 +835,12 @@ class default():
                 dataloader, current_iter, tb_logger, save_img)
 
     def get_current_log(self):
-        return self.log_dict
+        return {k : v / self.loss_samples for k, v in self.log_dict.items()}
+        #return self.log_dict
+    
+    def reset_current_log(self):
+        self.log_dict = {}
+        self.loss_samples = 0
 
     def model_to_device(self, net):
         """Model to device. It also warps models with DistributedDataParallel

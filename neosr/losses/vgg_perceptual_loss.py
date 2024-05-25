@@ -75,25 +75,19 @@ class PerceptualLoss(nn.Module):
             Tensor: Forward results.
         """
         # extract vgg features
-        x_features = self.vgg(x)
+        x_features  = self.vgg(x)
         gt_features = self.vgg(gt.detach())
+        percep_loss = 0.0
 
         # calculate perceptual loss
-        if self.perceptual_weight > 0:
-            percep_loss = 0
+        if self.perceptual_weight != 0:
             for k in x_features.keys():
+                if self.layer_weights[k] == 0:
+                    continue
                 if self.criterion_type == "fro":
                     # note: linalg.norm uses Frobenius norm by default
-                    percep_loss += (
-                        torch.linalg.norm(x_features[k] - gt_features[k])
-                        * self.layer_weights[k]
-                    )
+                    percep_loss += self.layer_weights[k] * torch.linalg.norm(x_features[k] - gt_features[k])
                 else:
-                    percep_loss += (
-                        self.criterion(x_features[k], gt_features[k])
-                        * self.layer_weights[k]
-                    )
-
-            percep_loss *= self.perceptual_weight
+                    percep_loss += self.layer_weights[k] * self.criterion(x_features[k], gt_features[k])
 
         return percep_loss

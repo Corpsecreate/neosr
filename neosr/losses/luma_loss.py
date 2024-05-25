@@ -50,4 +50,4 @@ class lumaloss(nn.Module):
             input_luma = torch.nn.AvgPool2d(kernel_size=int(self.scale))(input_luma)
             target_luma = torch.nn.AvgPool2d(kernel_size=int(self.scale))(target_luma)
 
-        return self.criterion(input_luma, target_luma) * self.loss_weight
+        return self.criterion(input_luma, target_luma)

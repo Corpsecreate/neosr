@@ -97,4 +97,4 @@ class gw_loss(nn.Module):
             d = d.expand(x1.shape)
             loss = (1 + 4 * d) * reduction
 
-        return torch.mean(loss) * self.loss_weight
+        return torch.mean(loss)

@@ -123,7 +123,7 @@ class mssim(nn.Module):
 
         loss = 1 - self.msssim(x, y)
 
-        return self.loss_weight * loss
+        return loss
 
     def msssim(self, x, y):
         ms_components = []
