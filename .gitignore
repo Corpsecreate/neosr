@@ -3,3 +3,6 @@ options/tmp/
 __pycache__/
 .ruff_cache/
 options.yml
+find_loss.yml
+test_options.yml
+train_options.yml

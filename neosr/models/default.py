@@ -72,7 +72,7 @@ class default():
 
         # options var
         train_opt = self.opt['train']
-        self.loss_alpha = 0.9990
+        self.loss_alpha = 0.999
         self.loss_emas  = {}
         self.live_emas  = {}
         self.log_dict   = {}
@@ -358,6 +358,7 @@ class default():
                     combined_HF_gt,
                 ) = wavelet_guided(self.output, self.gt)
 
+            LOSS_SF   = 100.0
             l_g_total = 0.0
             loss_dict = OrderedDict()
 
@@ -375,8 +376,8 @@ class default():
                         loss_pix = self.cri_pix(self.output, self.gt)
                     
                     self.loss_emas['l_g_pix'] = (self.loss_alpha * self.loss_emas.get('l_g_pix', loss_pix.item())) + (1 - self.loss_alpha) * loss_pix.item()
-                    sf                        = 1 / abs(self.live_emas.get('l_g_pix', self.loss_emas['l_g_pix']))
-                    l_g_total               += (loss_pix * self.cri_pix.loss_weight) * sf
+                    sf                        = LOSS_SF / abs(self.live_emas.get('l_g_pix', self.loss_emas['l_g_pix']))
+                    l_g_total               += (loss_pix * self.cri_pix.loss_weight)
                     back_losses_g['l_g_pix'] = (loss_pix * self.cri_pix.loss_weight) * sf
                     loss_dict['l_g_pix']     = loss_pix
                     
@@ -392,8 +393,8 @@ class default():
                         loss_mssim = self.cri_mssim(self.output, self.gt)
                         
                     self.loss_emas['l_g_mssim'] = (self.loss_alpha * self.loss_emas.get('l_g_mssim', loss_mssim.item())) + (1 - self.loss_alpha) * loss_mssim.item()
-                    sf                         = 1 / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
-                    l_g_total                 += (loss_mssim * self.cri_mssim.loss_weight) * sf
+                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
+                    l_g_total                 += (loss_mssim * self.cri_mssim.loss_weight)
                     back_losses_g['l_g_mssim'] = (loss_mssim * self.cri_mssim.loss_weight) * sf
                     loss_dict['l_g_mssim']     = loss_mssim
                     
@@ -401,8 +402,8 @@ class default():
                 if self.cri_perceptual and self.cri_perceptual.perceptual_weight != 0:
                     l_g_percep                  = self.cri_perceptual(self.output, self.gt)
                     self.loss_emas['l_g_percep'] = (self.loss_alpha * self.loss_emas.get('l_g_percep', l_g_percep.item())) + (1 - self.loss_alpha) * l_g_percep.item()
-                    sf                          = 1 / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
-                    l_g_total                  += (l_g_percep * self.cri_perceptual.perceptual_weight) * sf
+                    sf                          = LOSS_SF / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
+                    l_g_total                  += (l_g_percep * self.cri_perceptual.perceptual_weight)
                     back_losses_g['l_g_percep'] = (l_g_percep * self.cri_perceptual.perceptual_weight) * sf
                     loss_dict['l_g_percep']     = l_g_percep
                     
@@ -410,8 +411,8 @@ class default():
                 if self.cri_dists and self.cri_dists.loss_weight != 0:
                     l_g_dists                  = self.cri_dists(self.output, self.gt)
                     self.loss_emas['l_g_dists'] = (self.loss_alpha * self.loss_emas.get('l_g_dists', l_g_dists.item())) + (1 - self.loss_alpha) * l_g_dists.item()
-                    sf                         = 1 / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
-                    l_g_total                 += (l_g_dists * self.cri_dists.loss_weight) * sf
+                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
+                    l_g_total                 += (l_g_dists * self.cri_dists.loss_weight)
                     back_losses_g['l_g_dists'] = (l_g_dists * self.cri_dists.loss_weight) * sf
                     loss_dict['l_g_dists']     = l_g_dists
                     
@@ -420,8 +421,8 @@ class default():
                     pixel_weight             = get_refined_artifact_map(self.gt, self.output, 7)
                     l_g_ldl                  = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
                     self.loss_emas['l_g_ldl'] = (self.loss_alpha * self.loss_emas.get('l_g_ldl', l_g_ldl.item())) + (1 - self.loss_alpha) * l_g_ldl.item()
-                    sf                       = 1 / abs(self.live_emas.get('l_g_ldl', self.loss_emas['l_g_ldl']))
-                    l_g_total               += (l_g_ldl * self.cri_ldl.loss_weight) * sf
+                    sf                       = LOSS_SF / abs(self.live_emas.get('l_g_ldl', self.loss_emas['l_g_ldl']))
+                    l_g_total               += (l_g_ldl * self.cri_ldl.loss_weight)
                     back_losses_g['l_g_ldl'] = (l_g_ldl * self.cri_ldl.loss_weight) * sf
                     loss_dict['l_g_ldl']     = l_g_ldl
                     
@@ -429,8 +430,8 @@ class default():
                 if self.cri_ff and self.cri_ff.loss_weight != 0:
                     l_g_ff                  = self.cri_ff(self.output, self.gt)
                     self.loss_emas['l_g_ff'] = (self.loss_alpha * self.loss_emas.get('l_g_ff', l_g_ff.item())) + (1 - self.loss_alpha) * l_g_ff.item()
-                    sf                      = 1 / abs(self.live_emas.get('l_g_ff', self.loss_emas['l_g_ff']))
-                    l_g_total              += (l_g_ff * self.cri_ff.loss_weight) * sf
+                    sf                      = LOSS_SF / abs(self.live_emas.get('l_g_ff', self.loss_emas['l_g_ff']))
+                    l_g_total              += (l_g_ff * self.cri_ff.loss_weight)
                     back_losses_g['l_g_ff'] = (l_g_ff * self.cri_ff.loss_weight) * sf
                     loss_dict['l_g_ff']     = l_g_ff
                     
@@ -438,8 +439,8 @@ class default():
                 if self.cri_gw and self.cri_gw.loss_weight != 0:
                     l_g_gw                  = self.cri_gw(self.output, self.gt)
                     self.loss_emas['l_g_gw'] = (self.loss_alpha * self.loss_emas.get('l_g_gw', l_g_gw.item())) + (1 - self.loss_alpha) * l_g_gw.item()
-                    sf                      = 1 / abs(self.live_emas.get('l_g_gw', self.loss_emas['l_g_gw']))
-                    l_g_total              += (l_g_gw * self.cri_gw.loss_weight) * sf
+                    sf                      = LOSS_SF / abs(self.live_emas.get('l_g_gw', self.loss_emas['l_g_gw']))
+                    l_g_total              += (l_g_gw * self.cri_gw.loss_weight)
                     back_losses_g['l_g_gw'] = (l_g_gw * self.cri_gw.loss_weight) * sf
                     loss_dict['l_g_gw']     = l_g_gw
                     
@@ -447,8 +448,8 @@ class default():
                 if self.cri_color and self.cri_color.loss_weight != 0:
                     l_g_color                  = self.cri_color(self.output, self.lq_interp if self.match_lq else self.gt)
                     self.loss_emas['l_g_color'] = (self.loss_alpha * self.loss_emas.get('l_g_color', l_g_color.item())) + (1 - self.loss_alpha) * l_g_color.item()
-                    sf                         = 1 / abs(self.live_emas.get('l_g_color', self.loss_emas['l_g_color']))
-                    l_g_total                 += (l_g_color * self.cri_color.loss_weight) * sf
+                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_color', self.loss_emas['l_g_color']))
+                    l_g_total                 += (l_g_color * self.cri_color.loss_weight)
                     back_losses_g['l_g_color'] = (l_g_color * self.cri_color.loss_weight) * sf
                     loss_dict['l_g_color']     = l_g_color
                     
@@ -456,8 +457,8 @@ class default():
                 if self.cri_luma and self.cri_luma.loss_weight != 0:
                     l_g_luma                  = self.cri_luma(self.output, self.lq_interp if self.match_lq else self.gt)
                     self.loss_emas['l_g_luma'] = (self.loss_alpha * self.loss_emas.get('l_g_luma', l_g_luma.item())) + (1 - self.loss_alpha) * l_g_luma.item()
-                    sf                        = 1 / abs(self.live_emas.get('l_g_luma', self.loss_emas['l_g_luma']))
-                    l_g_total                += (l_g_luma * self.cri_luma.loss_weight) * sf
+                    sf                        = LOSS_SF / abs(self.live_emas.get('l_g_luma', self.loss_emas['l_g_luma']))
+                    l_g_total                += (l_g_luma * self.cri_luma.loss_weight)
                     back_losses_g['l_g_luma'] = (l_g_luma * self.cri_luma.loss_weight) * sf
                     loss_dict['l_g_luma']     = l_g_luma
                     
@@ -466,8 +467,8 @@ class default():
                     fake_g_pred              = self.net_d(self.output)
                     l_g_gan                  = self.cri_gan(fake_g_pred, True, is_disc=False)
                     self.loss_emas['l_g_gan'] = (self.loss_alpha * self.loss_emas.get('l_g_gan', l_g_gan.item())) + (1 - self.loss_alpha) * l_g_gan.item()
-                    sf                       = 1 / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
-                    l_g_total               += (l_g_gan * self.cri_gan.loss_weight) * sf
+                    sf                       = LOSS_SF / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
+                    l_g_total               += (l_g_gan * self.cri_gan.loss_weight)
                     back_losses_g['l_g_gan'] = (l_g_gan * self.cri_gan.loss_weight) * sf
                     loss_dict['l_g_gan']     = l_g_gan
         
@@ -512,8 +513,8 @@ class default():
                 loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())
 
             # Compute gradients
-            self.scaler_d.scale(l_d_real / self.accum_limit).backward(retain_graph=True)
-            self.scaler_d.scale(l_d_fake / self.accum_limit).backward(retain_graph=False)
+            self.scaler_d.scale(LOSS_SF * l_d_real / self.accum_limit).backward(retain_graph=True)
+            self.scaler_d.scale(LOSS_SF * l_d_fake / self.accum_limit).backward(retain_graph=False)
 
             # add total discriminator loss for tensorboard tracking
             loss_dict['l_d_total'] = (l_d_real + l_d_fake) / 2

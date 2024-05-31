@@ -25,6 +25,7 @@ class compact(nn.Module):
     """
 
     def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=upscale, act_type='prelu', **kwargs):
+    
         super(compact, self).__init__()
         self.num_in_ch = num_in_ch
         self.num_out_ch = num_out_ch
@@ -32,36 +33,39 @@ class compact(nn.Module):
         self.num_conv = num_conv
         self.upscale = upscale
         self.act_type = act_type
+        
+        self.num_feat *= self.upscale
+        self.num_conv *= self.upscale
 
         self.body = nn.ModuleList()
         # the first conv
-        self.body.append(nn.Conv2d(num_in_ch, num_feat, 3, 1, 1))
+        self.body.append(nn.Conv2d(self.num_in_ch, self.num_feat, 3, 1, 1))
         # the first activation
-        if act_type == 'relu':
+        if self.act_type == 'relu':
             activation = nn.ReLU(inplace=True)
-        elif act_type == 'prelu':
-            activation = nn.PReLU(num_parameters=num_feat)
-        elif act_type == 'leakyrelu':
+        elif self.act_type == 'prelu':
+            activation = nn.PReLU(num_parameters=self.num_feat)
+        elif self.act_type == 'leakyrelu':
             activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         self.body.append(activation)
 
         # the body structure
-        for _ in range(num_conv):
-            self.body.append(nn.Conv2d(num_feat, num_feat, 3, 1, 1))
+        for _ in range(self.num_conv):
+            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1))
             # activation
-            if act_type == 'relu':
+            if self.act_type == 'relu':
                 activation = nn.ReLU(inplace=True)
-            elif act_type == 'prelu':
-                activation = nn.PReLU(num_parameters=num_feat)
-            elif act_type == 'leakyrelu':
+            elif self.act_type == 'prelu':
+                activation = nn.PReLU(num_parameters=self.num_feat)
+            elif self.act_type == 'leakyrelu':
                 activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
             self.body.append(activation)
 
         # the last conv
-        self.body.append(nn.Conv2d(num_feat, num_out_ch *
-                         upscale * upscale, 3, 1, 1))
+        self.body.append(nn.Conv2d(self.num_feat, self.num_out_ch *
+                         self.upscale * self.upscale, 3, 1, 1))
         # upsample
-        self.upsampler = nn.PixelShuffle(upscale)
+        self.upsampler = nn.PixelShuffle(self.upscale)
 
     def forward(self, x):
         out = x

@@ -1,0 +1,1 @@
+python -m tensorboard.main --logdir=D:\neosr\experiments\tb_logger\train_crush --port=6006

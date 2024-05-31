@@ -13,7 +13,8 @@ from neosr.utils.options import parse_options
 def test_pipeline(root_path):
     # parse options, set distributed setting, set ramdom seed
     opt, _ = parse_options(root_path, is_train=False)
-
+    opt['name'] = str(opt['name'])
+    
     torch.set_default_device("cuda")
     torch.backends.cudnn.benchmark = True
 
@@ -27,6 +28,7 @@ def test_pipeline(root_path):
     # create test dataset and dataloader
     test_loaders = []
     for _, dataset_opt in sorted(opt["datasets"].items()):
+        dataset_opt['name'] = str(dataset_opt['name'])
         test_set = build_dataset(dataset_opt)
         num_gpu = opt.get("num_gpu", "auto")
         test_loader = build_dataloader(
