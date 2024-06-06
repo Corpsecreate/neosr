@@ -2,6 +2,7 @@ from functools import partial
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 
 from neosr.utils.registry import ARCH_REGISTRY
@@ -16,9 +17,9 @@ class DCCM(nn.Sequential):
 
     def __init__(self, dim: int):
         super().__init__(
-            nn.Conv2d(dim, dim * 2, 3, 1, 1),
+            nn.Conv2d(dim, dim * 2, 3, 1, 1, padding_mode = "replicate"),
             nn.Mish(),
-            nn.Conv2d(dim * 2, dim, 3, 1, 1),
+            nn.Conv2d(dim * 2, dim, 3, 1, 1, padding_mode = "replicate"),
         )
         trunc_normal_(self[-1].weight, std=0.02)
 
@@ -28,7 +29,7 @@ class PLKConv2d(nn.Module):
 
     def __init__(self, dim: int, kernel_size: int):
         super().__init__()
-        self.conv = nn.Conv2d(dim, dim, kernel_size, 1, kernel_size // 2)
+        self.conv = nn.Conv2d(dim, dim, kernel_size, 1, kernel_size // 2, padding_mode = "replicate")
         trunc_normal_(self.conv.weight, std=0.02)
         self.idx = dim
         self.training = training
@@ -47,7 +48,7 @@ class EA(nn.Module):
 
     def __init__(self, dim: int):
         super().__init__()
-        self.f = nn.Sequential(nn.Conv2d(dim, dim, 3, 1, 1), nn.Sigmoid())
+        self.f = nn.Sequential(nn.Conv2d(dim, dim, 3, 1, 1, padding_mode = "replicate"), nn.Sigmoid())
         trunc_normal_(self.f[0].weight, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -81,7 +82,7 @@ class PLKBlock(nn.Module):
             self.attn = nn.Identity()
 
         # Refinement
-        self.refine = nn.Conv2d(dim, dim, 1, 1, 0)
+        self.refine = nn.Conv2d(dim, dim, 1, 1, 0, padding_mode = "replicate")
         trunc_normal_(self.refine.weight, std=0.02)
 
         # Group Normalization
@@ -96,6 +97,42 @@ class PLKBlock(nn.Module):
         x = self.norm(x)
 
         return x + x_skip
+        
+class UpConv(nn.Module):
+    def __init__(self, scale: int, n_blocks: int):
+        super().__init__()
+        self.conv_before_upsample = nn.Sequential(
+            nn.Conv2d(3 * scale ** 2, n_blocks, 3, 1, 1, padding_mode = "replicate"),
+            nn.LeakyReLU(inplace=True)
+        )
+
+        if scale == 4:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='nearest-exact'),
+                nn.Conv2d(n_blocks, n_blocks, 3, 1, 1, padding_mode = "replicate"),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Upsample(scale_factor=2, mode='nearest-exact'),
+                nn.Conv2d(n_blocks, n_blocks, 3, 1, 1, padding_mode = "replicate"),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True)
+            )
+        else:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=scale, mode='nearest-exact'),
+                nn.Conv2d(n_blocks, n_blocks, 3, 1, 1, padding_mode = "replicate"),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True)
+            )
+
+        self.conv_hr = nn.Conv2d(n_blocks, n_blocks, 3, 1, 1, padding_mode = "replicate")
+        self.conv_last = nn.Conv2d(n_blocks, 3, 3, 1, 1, padding_mode = "replicate")
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_before_upsample(x)
+        x = self.upsample(x)
+        x = self.lrelu(self.conv_hr(x))
+        x = self.conv_last(x)
+
+        return x
 
 
 @ARCH_REGISTRY.register()
@@ -114,34 +151,47 @@ class realplksr(nn.Module):
         use_ea: bool = True,
         norm_groups: int = 4,
         dropout: float = 0,
+        upconv: bool = False,
         **kwargs,
     ):
         super().__init__()
+        
+        self.upscaling_factor = upscaling_factor
 
         if not training:
             dropout = 0
 
         self.feats = nn.Sequential(
-            *[nn.Conv2d(3, dim, 3, 1, 1)]
+            *[nn.Conv2d(3, dim, 3, 1, 1, padding_mode = "replicate")]
             + [
                 PLKBlock(dim, kernel_size, split_ratio, norm_groups, use_ea)
                 for _ in range(n_blocks)
             ]
             + [nn.Dropout2d(dropout)]
-            + [nn.Conv2d(dim, 3 * upscaling_factor**2, 3, 1, 1)]
+            + [nn.Conv2d(dim, 3 * self.upscaling_factor**2, 3, 1, 1, padding_mode = "replicate")]
         )
         trunc_normal_(self.feats[0].weight, std=0.02)
         trunc_normal_(self.feats[-1].weight, std=0.02)
 
         self.repeat_op = partial(
-            torch.repeat_interleave, repeats=upscaling_factor**2, dim=1
+            torch.repeat_interleave, repeats=self.upscaling_factor**2, dim=1
         )
 
-        self.to_img = nn.PixelShuffle(upscaling_factor)
+        if upconv:
+            self.upscaler = UpConv(self.upscaling_factor, n_blocks)
+        else:
+            self.upscaler = nn.PixelShuffle(self.upscaling_factor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.feats(x) + self.repeat_op(x)
-        return self.to_img(x)
+        out = self.feats(x) + self.repeat_op(x)
+        
+        if self.upscaling_factor != 1:
+            out = self.upscaler(out)
+            
+        base = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest-exact')
+        out += base
+        
+        return out
 
 
 @ARCH_REGISTRY.register()

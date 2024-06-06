@@ -366,6 +366,7 @@ class plksr(nn.Module):
         is_coreml: bool = False,
     ):
         super().__init__()
+        self.upscaling_factor = upscaling_factor
         self.feats = nn.Sequential(
             *[
                 nn.Conv2d(
@@ -387,23 +388,29 @@ class plksr(nn.Module):
                 )
                 for _ in range(n_blocks)
             ]
-            + [nn.Conv2d(dim, 3 * upscaling_factor**2, 3, 1, 1)]
+            + [nn.Conv2d(dim, 3 * self.upscaling_factor**2, 3, 1, 1)]
         )
         trunc_normal_(self.feats[0].weight, std=0.02)
         trunc_normal_(self.feats[-1].weight, std=0.02)
 
-        self.to_img = nn.PixelShuffle(upscaling_factor)
+        self.to_img = nn.PixelShuffle(self.upscaling_factor)
 
         self.repeat_op = (
-            partial(repeat_interleave, n=upscaling_factor**2)
+            partial(repeat_interleave, n=self.upscaling_factor**2)
             if is_coreml
-            else partial(torch.repeat_interleave, repeats=upscaling_factor**2, dim=1)
+            else partial(torch.repeat_interleave, repeats=self.upscaling_factor**2, dim=1)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.feats(x) + self.repeat_op(x)
-        x = self.to_img(x)
-        return x
+        out = self.feats(x) + self.repeat_op(x)
+        
+        if self.upscaling_factor != 1:
+            out = self.to_img(out)
+            
+        base = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest')
+        out += base
+        
+        return out
 
 
 @ARCH_REGISTRY.register()

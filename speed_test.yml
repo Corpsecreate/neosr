@@ -1,0 +1,165 @@
+
+name: train_custom
+model_type: default
+scale: 1
+use_amp: true
+bfloat16: true
+fast_matmul: true
+compile: false
+manual_seed: 63778
+
+datasets:
+  train:
+    type: paired
+    #dataroot_gt: 'D:\EVAUpscale\Output\TRAIN_HR'
+    #dataroot_lq: 'D:\EVAUpscale\Output\TRAIN_LR'
+    dataroot_gt: 'D:\DBZ\Align\Output\VAL_SCORING_HR\'
+    dataroot_lq: 'D:\DBZ\Align\Output\VAL_SCORING_LR\'
+    #meta_info: 'datasets/meta_info.txt'
+    io_backend:
+      type: disk
+
+    gt_size: 96
+    batch_size: 2
+    accumulate: 24
+    dataset_enlarge_ratio: 1
+    
+    # 0.0520 size=48
+    # 0.0432 size=96
+    # 0.0405 size=192
+    # 0.0395 size=384
+
+    use_hflip: true
+    use_rot: true
+    #augmentation: ['none', 'mixup', 'cutmix', 'resizemix'] #['cutblur']
+    #aug_prob: [0.5, 0.1, 0.1, 0.1] #[0.7]
+
+  #val:
+    #name: val_for_outputs
+    #type: single
+    #dataroot_gt: 'D:\DBZ\Align\Output\VAL_HR\'
+    #dataroot_lq: 'D:\DBZ\Align\Output\VAL_LR\'
+    #io_backend:
+    #  type: disk
+    
+    #name: val_for_scoring
+    #type: paired
+    #dataroot_gt: 'D:\DBZ\Align\Output\VAL_SCORING_HR\'
+    #dataroot_lq: 'D:\DBZ\Align\Output\VAL_SCORING_LR\'
+    #io_backend:
+    #  type: disk
+      
+val:
+  val_freq: 20000
+  save_img: false
+  tile: -1 # 200
+  metrics:
+    #psnr:
+    #  type: calculate_psnr
+    #ssim:
+    #  type: calculate_ssim
+    dists:
+      type: calculate_dists
+      better: lower
+
+path:
+  #pretrain_network_g: 'D:\saved_models\1x_compact_g.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_12000.pth'
+  resume_state: ~
+  #strict_load_g: false # do not uncomment, read docs
+
+network_g:
+  type: custom
+
+network_d:
+  type: unet
+
+train:
+
+  total_iter: 1001
+  warmup_iter: -1  # no warm up
+  grad_clip: false
+  
+  optim_g:
+    type: adamw
+    lr: !!float 8e-4
+    weight_decay: 0.0
+    #betas: [0.9, 0.99]
+    betas: [0.80, 0.90]
+    
+    #type: sgd
+    #lr: !!float 5e-3
+    
+  optim_d:
+    type: nadam
+    lr: !!float 1e-4
+    betas: [0.98, 0.99]
+    weight_decay: 0.01
+    decoupled_weight_decay: true
+
+  scheduler:
+    type: multisteplr
+    milestones: [200, 1000, 3000, 5000, 10000, 20000, 50000, 80000]
+    gamma: 0.5
+
+  # losses
+  wavelet_guided: "off" # "disc", "on"
+  mssim_opt:
+    type: mssim
+    loss_weight: 0.00
+  dists_opt:
+    type: dists
+    loss_weight: 0.65
+  perceptual_opt:
+    type: PerceptualLoss
+    #'conv1_1', 'relu1_1', 'conv1_2', 'relu1_2', 'pool1', 'conv2_1', 'relu2_1', 'conv2_2', 'relu2_2', 'pool2',
+    #'conv3_1', 'relu3_1', 'conv3_2', 'relu3_2', 'conv3_3', 'relu3_3', 'conv3_4', 'relu3_4', 'pool3', 'conv4_1',
+    #'relu4_1', 'conv4_2', 'relu4_2', 'conv4_3', 'relu4_3', 'conv4_4', 'relu4_4', 'pool4', 'conv5_1', 'relu5_1',
+    #'conv5_2', 'relu5_2', 'conv5_3', 'relu5_3', 'conv5_4', 'relu5_4', 'pool5'
+    layer_weights:
+      'conv1_2': 0.0
+      'relu1_2': 0.0
+      'conv2_2': 0.0
+      'relu2_2': 0.0
+      'conv3_4': 0.10
+      'relu3_4': 0.10
+      'conv4_4': 0.10
+      'relu4_4': 0.10
+      'conv5_3': 0.15
+      'relu5_3': 0.15
+      'conv5_4': 0.15
+      'relu5_4': 0.15
+    perceptual_weight: 0.0
+    criterion: l2
+    
+  # vanilla, lsgan, huber, chc
+  gan_opt:
+    type: GANLoss
+    gan_type: vanilla
+    loss_weight: 0.00
+  
+  #ldl_opt:
+  #  type: HuberLoss
+  #  loss_weight: 1.0
+  ff_opt:
+    type: focalfrequencyloss
+    loss_weight: 0.00
+  gw_opt:
+    type: gw_loss
+    loss_weight: 0.00
+    criterion: chc
+
+  match_lq: false
+  color_opt:
+    type: colorloss
+    loss_weight: 0.0
+    criterion: huber
+  luma_opt:
+    type: lumaloss
+    loss_weight: 0.00
+    criterion: l2
+
+logger:
+  print_freq: 500
+  save_checkpoint_freq: 5000
+  use_tb_logger: true

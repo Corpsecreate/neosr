@@ -76,6 +76,10 @@ class default():
         self.loss_emas  = {}
         self.live_emas  = {}
         self.log_dict   = {}
+        
+        self.optimise_calls = 0
+        self.optimise_perf = 0
+        self.optimise_time = 0
 
         # set nets to training mode
         self.net_g.train()
@@ -321,6 +325,9 @@ class default():
 
     def optimize_parameters(self, current_iter):
 
+        optimise_start_perf = time.perf_counter()
+        optimise_start_time = time.process_time()
+        
         if self.net_d is not None:
             for p in self.net_d.parameters():
                 p.requires_grad = False
@@ -333,6 +340,13 @@ class default():
         
         # list of loss functions to apply backward() on
         back_losses_g = {}
+        gan_sf = 1.0
+        trim_size = 2
+        
+        def trim_image(x, trim):
+            if trim == 0:
+                return x
+            return x[:, :, trim : x.shape[2] - trim, trim : x.shape[3] - trim]
         
         ##########################
         # GENERATOR
@@ -340,6 +354,8 @@ class default():
         with torch.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
 
             self.output = self.net_g(self.lq)
+            trimmed_output = trim_image(self.output, trim_size)
+            trimmed_gt     = trim_image(self.gt, trim_size)
             # lq match
             self.lq_interp = F.interpolate(self.lq, scale_factor=self.scale, mode='bicubic')
 
@@ -390,7 +406,8 @@ class default():
                         l_g_mssim_hh = self.wg_pw_hh * self.cri_mssim(HH, HH_gt)
                         loss_mssim   = (l_g_mssim + l_g_mssim_lh + l_g_mssim_hl + l_g_mssim_hh)
                     else:
-                        loss_mssim = self.cri_mssim(self.output, self.gt)
+                        #loss_mssim = self.cri_mssim(self.output, self.gt)
+                        loss_mssim = self.cri_mssim(trimmed_output, trimmed_gt)
                         
                     self.loss_emas['l_g_mssim'] = (self.loss_alpha * self.loss_emas.get('l_g_mssim', loss_mssim.item())) + (1 - self.loss_alpha) * loss_mssim.item()
                     sf                         = LOSS_SF / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
@@ -400,7 +417,9 @@ class default():
                     
                 # perceptual loss
                 if self.cri_perceptual and self.cri_perceptual.perceptual_weight != 0:
-                    l_g_percep                  = self.cri_perceptual(self.output, self.gt)
+                    #l_g_percep                  = self.cri_perceptual(self.output, self.gt)
+                    l_g_percep                  = self.cri_perceptual(trimmed_output, trimmed_gt)
+                    trim_image
                     self.loss_emas['l_g_percep'] = (self.loss_alpha * self.loss_emas.get('l_g_percep', l_g_percep.item())) + (1 - self.loss_alpha) * l_g_percep.item()
                     sf                          = LOSS_SF / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
                     l_g_total                  += (l_g_percep * self.cri_perceptual.perceptual_weight)
@@ -409,7 +428,8 @@ class default():
                     
                 # dists loss
                 if self.cri_dists and self.cri_dists.loss_weight != 0:
-                    l_g_dists                  = self.cri_dists(self.output, self.gt)
+                    #l_g_dists                  = self.cri_dists(self.output, self.gt)
+                    l_g_dists                  = self.cri_dists(trimmed_output, trimmed_gt)
                     self.loss_emas['l_g_dists'] = (self.loss_alpha * self.loss_emas.get('l_g_dists', l_g_dists.item())) + (1 - self.loss_alpha) * l_g_dists.item()
                     sf                         = LOSS_SF / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
                     l_g_total                 += (l_g_dists * self.cri_dists.loss_weight)
@@ -468,6 +488,7 @@ class default():
                     l_g_gan                  = self.cri_gan(fake_g_pred, True, is_disc=False)
                     self.loss_emas['l_g_gan'] = (self.loss_alpha * self.loss_emas.get('l_g_gan', l_g_gan.item())) + (1 - self.loss_alpha) * l_g_gan.item()
                     sf                       = LOSS_SF / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
+                    gan_sf = sf
                     l_g_total               += (l_g_gan * self.cri_gan.loss_weight)
                     back_losses_g['l_g_gan'] = (l_g_gan * self.cri_gan.loss_weight) * sf
                     loss_dict['l_g_gan']     = l_g_gan
@@ -528,6 +549,8 @@ class default():
                 print("="*80)
                 for x, y in self.loss_emas.items():
                     print("{:<16}{:<16.5f}{:<16.5f}".format(x, self.live_emas.get(x, 0), y))
+                print("Perf: {:.8f}".format(self.optimise_perf / self.optimise_calls))
+                print("Proc: {:.8f}".format(self.optimise_time / self.optimise_calls))
             
             self.live_emas = {k : v for k, v in self.loss_emas.items()}
             
@@ -567,6 +590,10 @@ class default():
                 
         for key in loss_dict:
             self.log_dict[key] = self.log_dict.get(key, 0) + loss_dict[key].item() * n_samples
+            
+        self.optimise_perf += time.perf_counter() - optimise_start_perf
+        self.optimise_time += time.process_time() - optimise_start_time
+        self.optimise_calls += 1
 
 
     def update_learning_rate(self, current_iter, warmup_iter=-1):
@@ -721,11 +748,24 @@ class default():
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
 
-        # flag to not apply augmentation during val
-        self.is_train = False
-
         dataset_name = dataloader.dataset.opt['name']
-        with_metrics = self.opt['val'].get('metrics') is not None
+        dataset_type = dataloader.dataset.opt['type']
+        save_img     = dataloader.dataset.opt.get('save_img', False)
+        with_metrics = dataloader.dataset.opt.get('metrics', False)
+        
+        if not save_img and not with_metrics:
+            return
+            
+        # flag to not apply augmentation during val
+        self.is_train = False        
+        
+        print(dataset_name, dataset_type, save_img, with_metrics)
+        
+        #if dataset_type == "single":
+        #    with_metrics = False
+        #else:
+        #    with_metrics = self.opt['val'].get('metrics') is not None
+            
         use_pbar = self.opt['val'].get('pbar', False)
 
         if with_metrics:
@@ -759,7 +799,10 @@ class default():
             del self.lq
             del self.output
             torch.cuda.empty_cache()
-
+            
+            # check if dataset has save_img option, and if so overwrite global save_img option
+            #save_img = self.opt["val"].get("save_img", False)
+            print(dataset_name, dataset_type, save_img, with_metrics, img_name)
             if save_img:
                 if self.opt['is_train']:
                     save_img_path = osp.join(self.opt['path']['visualization'], img_name,
@@ -773,6 +816,12 @@ class default():
                                                  f'{img_name}_{self.opt["name"]}.png')
                 imwrite(sr_img, save_img_path)
 
+            # check for dataset option save_tb, to save images on tb_logger    
+            save_tb = self.opt["val"].get("save_tb", False)
+
+            if save_tb:
+                tb_logger.add_image(f'{img_name}/{current_iter}', sr_img, global_step=current_iter, dataformats='HWC')
+                
             if with_metrics:
                 # calculate metrics
                 for name, opt_ in self.opt['val']['metrics'].items():
@@ -781,6 +830,7 @@ class default():
             if use_pbar:
                 pbar.update(1)
                 pbar.set_description(f'Test {img_name}')
+
         if use_pbar:
             pbar.close()
 
@@ -799,9 +849,9 @@ class default():
     def _log_validation_metric_values(self, current_iter, dataset_name, tb_logger):
         log_str = f'Validation {dataset_name}\n\n'
         for metric, value in self.metric_results.items():
-            log_str += f'\t # {metric+":":<8} {value:.4f}'
+            log_str += f'\t # {metric}: {value:.4f}'
             if hasattr(self, 'best_metric_results'):
-                log_str += (f'......Best: {self.best_metric_results[dataset_name][metric]["val"]:>8.4f} @ '
+                log_str += (f'........ Best: {self.best_metric_results[dataset_name][metric]["val"]:.4f} @ '
                             f'{self.best_metric_results[dataset_name][metric]["iter"]} iter')
             log_str += '\n'
 
@@ -832,8 +882,7 @@ class default():
         if self.opt['dist']:
             self.dist_validation(dataloader, current_iter, tb_logger, save_img)
         else:
-            self.nondist_validation(
-                dataloader, current_iter, tb_logger, save_img)
+            self.nondist_validation(dataloader, current_iter, tb_logger, save_img)
 
     def get_current_log(self):
         return {k : v / self.loss_samples for k, v in self.log_dict.items()}

@@ -1,0 +1,32 @@
+# Results will be saved to neosr/experiments/results/
+name: 2x_realplksr
+model_type: default
+scale: 2
+use_amp: false
+compile: false
+
+datasets:
+  test_1:  
+    name: test_030
+    type: single
+    dataroot_lq: 'D:\DBZ\Align\Output\VAL_LR\'
+    io_backend:
+      type: disk
+
+network_g:
+  type: realplksr
+
+path:
+  #pretrain_network_g: 'D:\neosr\experiments\find_loss_conv2_2_l2\models\net_g_100000.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_8262.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\archtest_compact_small\models\net_g_latest.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\2x_dat2\models\net_g_1345.pth'
+  pretrain_network_g: 'D:\saved_models\2x_realplksr_g.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\archtest_span\models\net_g_latest.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\archtest_realplksr\models\net_g_latest.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_12000.pth'
+  #strict_load_g: false # do not uncomment, read docs
+
+val:
+  save_img: true
+  suffix: ~

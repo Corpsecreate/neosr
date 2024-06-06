@@ -1,0 +1,185 @@
+
+name: 2x_custom
+model_type: default
+scale: 2
+use_amp: false
+bfloat16: false
+fast_matmul: false
+compile: false
+manual_seed: 63778
+
+network_g:
+  type: custom
+
+network_d:
+  type: compact_small
+  
+path:
+  #pretrain_network_g: 'D:\saved_models\2x_custom_g.pth'
+  #pretrain_network_d: 'D:\saved_models\2x_d.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_12000.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\archtest_compact_small\models\net_g_latest.pth'
+  resume_state: ~
+  #strict_load_g: false # do not uncomment, read docs
+
+datasets:
+  
+  train:
+    
+    type: paired
+    dataroot_lq: 'D:\DBZ\Align\Output\TRAIN_LR_2x_clust'
+    dataroot_gt: 'D:\DBZ\Align\Output\TRAIN_HR_2x_clust'
+    #dataroot_lq: 'D:\DBZ\Align\Output\VAL_SCORING_LR\'
+    #dataroot_gt: 'D:\DBZ\Align\Output\VAL_SCORING_HR\'
+    #meta_info: 'datasets/meta_info.txt'
+    io_backend:
+      type: disk
+
+    gt_size: 96
+    batch_size: 3
+    accumulate: 1
+    dataset_enlarge_ratio: 1
+    use_hflip: true
+    use_rot: true
+    #augmentation: ['none', 'mixup', 'cutmix', 'resizemix'] #['cutblur']
+    #aug_prob: [0.5, 0.1, 0.1, 0.1] #[0.7]
+    
+    # 0.0520 size=48
+    # 0.0432 size=96
+    # 0.0405 size=192
+    # 0.0395 size=384
+    # 0.04827 (compact)
+
+  val_1:
+    name: val_for_outputs
+    type: single
+    save_img: true
+    metrics: false
+    dataroot_lq: 'D:\DBZ\Align\Output\VAL_LR\'
+    #dataroot_gt: 'D:\DBZ\Align\Output\VAL_HR\'
+    io_backend:
+      type: disk
+      
+  val_2:
+    name: val_for_scoring
+    type: paired
+    save_img: false
+    metrics: true
+    dataroot_lq: 'D:\DBZ\Align\Output\VAL_SCORING_LR_2x\'
+    dataroot_gt: 'D:\DBZ\Align\Output\VAL_SCORING_HR_2x\'
+    io_backend:
+      type: disk
+      
+val:
+  val_freq: 5000
+  #save_img: true
+  tile: -1 # 200
+  metrics:
+    psnr:
+      type: calculate_psnr
+    ssim:
+      type: calculate_ssim
+    dists:
+      type: calculate_dists
+      better: lower
+
+train:
+
+  total_iter: 100000
+  warmup_iter: -1  # no warm up
+  grad_clip: false
+  
+  optim_g:
+    type: adamw
+    lr: !!float 2e-4
+    weight_decay: 0.0
+    #betas: [0.9, 0.99]
+    betas: [0.80, 0.90]
+    
+    #type: sgd
+    #lr: !!float 5e-3
+    
+  optim_d:
+    type: nadam
+    lr: !!float 2e-4
+    betas: [0.98, 0.99]
+    weight_decay: 0.01
+    decoupled_weight_decay: true
+    
+    #type: adamw
+    #lr: !!float 2e-4
+    #betas: [0.80, 0.90]
+    #weight_decay: 0.0001
+
+  scheduler:
+    #type: multisteplr
+    #milestones: [200, 1000, 3000, 5000, 10000, 20000, 50000, 80000]
+    #gamma: 0.5
+    type: ExponentialLR
+    gamma: 0.99998
+
+  # losses
+  wavelet_guided: "off" # "disc", "on"
+  #mssim_opt:
+  #  type: mssim
+  #  loss_weight: 0.08
+  dists_opt:
+    type: dists
+    loss_weight: 1.00
+    #loss_weight: 0.36
+  #perceptual_opt:
+  #  type: PerceptualLoss
+    #'conv1_1', 'relu1_1', 'conv1_2', 'relu1_2', 'pool1', 'conv2_1', 'relu2_1', 'conv2_2', 'relu2_2', 'pool2',
+    #'conv3_1', 'relu3_1', 'conv3_2', 'relu3_2', 'conv3_3', 'relu3_3', 'conv3_4', 'relu3_4', 'pool3', 'conv4_1',
+    #'relu4_1', 'conv4_2', 'relu4_2', 'conv4_3', 'relu4_3', 'conv4_4', 'relu4_4', 'pool4', 'conv5_1', 'relu5_1',
+    #'conv5_2', 'relu5_2', 'conv5_3', 'relu5_3', 'conv5_4', 'relu5_4', 'pool5'
+  #  layer_weights:
+  #    'conv1_2': 0.02
+  #    'relu1_2': 0.02
+  #    'conv2_2': 0.02
+  #    'relu2_2': 0.02
+  #    'conv3_4': 0.04
+  #    'relu3_4': 0.04
+  #    'conv4_3': 0.06
+  #    'relu4_3': 0.06
+  #    'conv4_4': 0.10
+  #    'relu4_4': 0.10
+  #    'conv5_3': 0.12
+  #    'relu5_3': 0.12
+  #    'conv5_4': 0.14
+  #    'relu5_4': 0.14
+  #  perceptual_weight: 0.27
+  #  criterion: l2
+    
+  # vanilla, lsgan, huber, chc
+  gan_opt:
+    type: GANLoss
+    gan_type: vanilla
+    #loss_weight: 0.29
+    loss_weight: 0.0
+  
+  #ldl_opt:
+  #  type: HuberLoss
+  #  loss_weight: 1.0
+  #ff_opt:
+  #  type: focalfrequencyloss
+  #  loss_weight: 0.02
+  #gw_opt:
+  #  type: gw_loss
+  #  loss_weight: 0.02
+  #  criterion: chc
+
+  #match_lq: false
+  #color_opt:
+  #  type: colorloss
+  #  loss_weight: 0.0
+  #  criterion: huber
+  #luma_opt:
+  #  type: lumaloss
+  #  loss_weight: 0.00
+  #  criterion: l2
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  use_tb_logger: true

@@ -846,22 +846,26 @@ class dat(nn.Module):
         Input: x: (B, C, H, W)
         """
         self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        out = (x - self.mean) * self.img_range
 
         if self.upsampler == 'pixelshuffle':
             # for image SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.conv_before_upsample(x)
-            x = self.conv_last(self.upsample(x))
+            out = self.conv_first(out)
+            out = self.conv_after_body(self.forward_features(out)) + out
+            out = self.conv_before_upsample(out)
+            out = self.conv_last(self.upsample(out))
         elif self.upsampler == 'pixelshuffledirect':
             # for lightweight SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.upsample(x)
+            out = self.conv_first(out)
+            out = self.conv_after_body(self.forward_features(out)) + out
+            out = self.upsample(out)
 
-        x = x / self.img_range + self.mean
-        return x
+        out = out / self.img_range + self.mean
+        
+        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        out += base
+        
+        return out
 
 
 @ARCH_REGISTRY.register()

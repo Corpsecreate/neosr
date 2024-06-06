@@ -85,7 +85,7 @@ def create_train_val_dataloader(opt, logger):
                 f'\n\tRequired iters per epoch: {num_iter_per_epoch}'
                 f'\n\tTotal epochs: {total_epochs}. Total iters: {total_iters // accumulate}'
             )
-        elif phase.split("_")[0] == "val":
+        elif phase.upper().startswith("VAL"):
             val_set = build_dataset(dataset_opt)
             val_loader = build_dataloader(
                 val_set,
@@ -273,7 +273,7 @@ def train_pipeline(root_path):
                             val_loader,
                             int(current_iter_log),
                             tb_logger,
-                            opt["val"]["save_img"],
+                            opt.get("val", {}).get("save_img", False),
                         )
 
                 #data_timer.start()
@@ -297,7 +297,7 @@ def train_pipeline(root_path):
         accumulate = opt["datasets"]["train"].get("accumulate", 1)
         for val_loader in val_loaders:
             model.validation(
-                val_loader, int(current_iter / accumulate), tb_logger, opt["val"]["save_img"]
+                val_loader, int(current_iter_log), tb_logger, opt.get("val", {}).get("save_img", False)
             )
     if tb_logger:
         tb_logger.close()

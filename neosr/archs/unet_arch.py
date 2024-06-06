@@ -43,6 +43,10 @@ class unet(nn.Module):
         self.conv7 = norm(nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=False))
         self.conv8 = norm(nn.Conv2d(num_feat, num_feat, 3, 1, 1, bias=False))
         self.conv9 = nn.Conv2d(num_feat, 1, 3, 1, 1)
+        
+        #self.flatten = nn.Flatten()
+        #self.activation_end = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        #self.dense_end = nn.Linear(128*128, 1)
 
     def forward(self, x):
         # downsample
@@ -75,6 +79,10 @@ class unet(nn.Module):
         out = F.leaky_relu(self.conv7(x6), negative_slope=0.2, inplace=True)
         out = F.leaky_relu(self.conv8(out), negative_slope=0.2, inplace=True)
         out = self.conv9(out)
+        
+        #out = self.flatten(out)
+        #out = self.activation_end(out).view(out.shape[0], -1)
+        #out = self.dense_end(out)
 
         return out
 

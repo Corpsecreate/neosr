@@ -33,13 +33,14 @@ class compact(nn.Module):
         self.num_conv = num_conv
         self.upscale = upscale
         self.act_type = act_type
+        self.pad_mode = "replicate"
         
-        self.num_feat *= self.upscale
-        self.num_conv *= self.upscale
+        #self.num_feat *= self.upscale
+        #self.num_conv *= self.upscale
 
         self.body = nn.ModuleList()
         # the first conv
-        self.body.append(nn.Conv2d(self.num_in_ch, self.num_feat, 3, 1, 1))
+        self.body.append(nn.Conv2d(self.num_in_ch, self.num_feat, 3, 1, 1, padding_mode = self.pad_mode))
         # the first activation
         if self.act_type == 'relu':
             activation = nn.ReLU(inplace=True)
@@ -51,7 +52,7 @@ class compact(nn.Module):
 
         # the body structure
         for _ in range(self.num_conv):
-            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1))
+            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1, padding_mode = self.pad_mode))
             # activation
             if self.act_type == 'relu':
                 activation = nn.ReLU(inplace=True)
@@ -62,8 +63,7 @@ class compact(nn.Module):
             self.body.append(activation)
 
         # the last conv
-        self.body.append(nn.Conv2d(self.num_feat, self.num_out_ch *
-                         self.upscale * self.upscale, 3, 1, 1))
+        self.body.append(nn.Conv2d(self.num_feat, self.num_out_ch * self.upscale ** 2, 3, 1, 1, padding_mode = self.pad_mode))
         # upsample
         self.upsampler = nn.PixelShuffle(self.upscale)
 
@@ -78,4 +78,29 @@ class compact(nn.Module):
         # add the nearest upsampled image, so that the network learns the residual
         base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest')
         out += base
+        
         return out
+        
+@ARCH_REGISTRY.register()
+def compact_small(**kwargs):
+    return compact(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=48,
+            num_conv=8,
+            upscale=upscale,
+            act_type='prelu',
+            **kwargs
+            )
+
+@ARCH_REGISTRY.register()
+def compact_large(**kwargs):
+    return compact(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=96,
+            num_conv=24,
+            upscale=upscale,
+            act_type='prelu',
+            **kwargs
+            )
