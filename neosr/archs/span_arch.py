@@ -269,7 +269,7 @@ class span(nn.Module):
         output = self.upsampler(out)
             
         # add the nearest upsampled image, so that the network learns the residual
-        base    = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        base    = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
         output += base
 
         return output

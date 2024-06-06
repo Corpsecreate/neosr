@@ -2,9 +2,9 @@
 name: 2x_custom
 model_type: default
 scale: 2
-use_amp: false
-bfloat16: false
-fast_matmul: false
+use_amp: true
+bfloat16: true
+fast_matmul: true
 compile: false
 manual_seed: 63778
 
@@ -35,8 +35,8 @@ datasets:
     io_backend:
       type: disk
 
-    gt_size: 96
-    batch_size: 3
+    gt_size: 192
+    batch_size: 2
     accumulate: 1
     dataset_enlarge_ratio: 1
     use_hflip: true
@@ -54,6 +54,7 @@ datasets:
     name: val_for_outputs
     type: single
     save_img: true
+    save_tb: true
     metrics: false
     dataroot_lq: 'D:\DBZ\Align\Output\VAL_LR\'
     #dataroot_gt: 'D:\DBZ\Align\Output\VAL_HR\'
@@ -64,6 +65,7 @@ datasets:
     name: val_for_scoring
     type: paired
     save_img: false
+    save_tb: false
     metrics: true
     dataroot_lq: 'D:\DBZ\Align\Output\VAL_SCORING_LR_2x\'
     dataroot_gt: 'D:\DBZ\Align\Output\VAL_SCORING_HR_2x\'
@@ -75,10 +77,10 @@ val:
   #save_img: true
   tile: -1 # 200
   metrics:
-    psnr:
-      type: calculate_psnr
-    ssim:
-      type: calculate_ssim
+    #psnr:
+    #  type: calculate_psnr
+    #ssim:
+    #  type: calculate_ssim
     dists:
       type: calculate_dists
       better: lower

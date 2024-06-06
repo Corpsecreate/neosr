@@ -751,15 +751,17 @@ class default():
         dataset_name = dataloader.dataset.opt['name']
         dataset_type = dataloader.dataset.opt['type']
         save_img     = dataloader.dataset.opt.get('save_img', False)
+        save_tb      = dataloader.dataset.opt.get('save_tb', False)
         with_metrics = dataloader.dataset.opt.get('metrics', False)
         
-        if not save_img and not with_metrics:
+        
+        if not save_img and not save_tb and not with_metrics:
             return
             
         # flag to not apply augmentation during val
         self.is_train = False        
         
-        print(dataset_name, dataset_type, save_img, with_metrics)
+        #print(dataset_name, dataset_type, save_img, with_metrics)
         
         #if dataset_type == "single":
         #    with_metrics = False
@@ -802,7 +804,7 @@ class default():
             
             # check if dataset has save_img option, and if so overwrite global save_img option
             #save_img = self.opt["val"].get("save_img", False)
-            print(dataset_name, dataset_type, save_img, with_metrics, img_name)
+            #print(dataset_name, dataset_type, save_img, with_metrics, img_name)
             if save_img:
                 if self.opt['is_train']:
                     save_img_path = osp.join(self.opt['path']['visualization'], img_name,
@@ -816,17 +818,13 @@ class default():
                                                  f'{img_name}_{self.opt["name"]}.png')
                 imwrite(sr_img, save_img_path)
 
-            # check for dataset option save_tb, to save images on tb_logger    
-            save_tb = self.opt["val"].get("save_tb", False)
-
             if save_tb:
-                tb_logger.add_image(f'{img_name}/{current_iter}', sr_img, global_step=current_iter, dataformats='HWC')
+                tb_logger.add_image(f'{img_name}/{current_iter}', sr_img[:,:,[2,1,0]], global_step=current_iter, dataformats='HWC')
                 
             if with_metrics:
                 # calculate metrics
                 for name, opt_ in self.opt['val']['metrics'].items():
-                    self.metric_results[name] += calculate_metric(
-                        metric_data, opt_)
+                    self.metric_results[name] += calculate_metric(metric_data, opt_)
             if use_pbar:
                 pbar.update(1)
                 pbar.set_description(f'Test {img_name}')
@@ -841,8 +839,7 @@ class default():
                 self._update_best_metric_result(
                     dataset_name, metric, self.metric_results[metric], current_iter)
 
-            self._log_validation_metric_values(
-                current_iter, dataset_name, tb_logger)
+            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
 
         self.is_train = True
 
@@ -859,15 +856,17 @@ class default():
         logger.info(log_str)
         if tb_logger:
             for metric, value in self.metric_results.items():
-                tb_logger.add_scalar(
-                    f'metrics/{dataset_name}/{metric}', value, current_iter)
+                tb_logger.add_scalar(f'metrics/{dataset_name}/{metric}', value, current_iter)
 
-    def get_current_visuals(self):
+    def get_current_visuals(self, lq=True, result=True, gt=True):
         out_dict = OrderedDict()
-        out_dict['lq'] = self.lq.detach().cpu()
-        out_dict['result'] = self.output.detach().cpu()
+        if lq:
+            out_dict['lq'] = self.lq.detach().cpu()
+        if result:
+            out_dict['result'] = self.output.detach().cpu()
         if hasattr(self, 'gt'):
-            out_dict['gt'] = self.gt.detach().cpu()
+            if gt:
+                out_dict['gt'] = self.gt.detach().cpu()
         return out_dict
 
     def validation(self, dataloader, current_iter, tb_logger, save_img=True):

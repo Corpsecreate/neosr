@@ -862,7 +862,7 @@ class dat(nn.Module):
 
         out = out / self.img_range + self.mean
         
-        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
         out += base
         
         return out

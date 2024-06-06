@@ -407,7 +407,7 @@ class plksr(nn.Module):
         if self.upscaling_factor != 1:
             out = self.to_img(out)
             
-        base = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest')
+        base = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest-exact')
         out += base
         
         return out
