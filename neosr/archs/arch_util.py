@@ -210,6 +210,39 @@ def _ntuple(n):
         return tuple(repeat(x, n))
 
     return parse
+    
+class PadAndMask(torch.nn.Module):
+
+    def __init__(self, pad_size, pad_value, fill=False):
+    
+        super(PadAndMask, self).__init__()
+        self.pad_size    = pad_size
+        self.pad_value   = pad_value
+        self.fill        = fill
+        self.padder_x    = nn.ConstantPad2d(pad_size, pad_value)
+        self.padder_mask = nn.ConstantPad2d(pad_size, 0)
+
+    def forward(self, x):
+        if self.pad_size == 0:
+            out = x
+        elif self.fill:
+            ones = torch.ones_like(x[:,0,:,:]).unsqueeze(1)
+            mask = 1 - self.padder_mask(ones)
+            out  = self.padder_mask(x)
+            
+            out[:, :, 0:self.pad_size, :] = out[:, :, self.pad_size, :].unsqueeze(2)
+            out[:, :, out.shape[2]-self.pad_size:, :] = out[:, :, out.shape[2]-self.pad_size-1, :].unsqueeze(2)
+            
+            out[:, :, :, 0:self.pad_size] = out[:, :, :, self.pad_size].unsqueeze(3)
+            out[:, :, :, out.shape[3]-self.pad_size:] = out[:, :, :, out.shape[3]-self.pad_size-1].unsqueeze(3)
+            
+            out  = torch.cat((out, mask), dim=1)
+        else:
+            ones = torch.ones_like(x[:,0,:,:]).unsqueeze(1)
+            mask = 1 - self.padder_mask(ones)
+            out  = self.padder_x(x)
+            out  = torch.cat((out, mask), dim=1)
+        return out
 
 
 to_1tuple = _ntuple(1)

@@ -341,7 +341,7 @@ class default():
         # list of loss functions to apply backward() on
         back_losses_g = {}
         gan_sf = 1.0
-        trim_size = 2
+        trim_size = 0
         
         def trim_image(x, trim):
             if trim == 0:
@@ -708,9 +708,11 @@ class default():
 
     @torch.no_grad()
     def feed_data(self, data):
-        self.lq = data['lq'].to(self.device, memory_format=torch.channels_last, non_blocking=True)
+        #self.lq = data['lq'].to(self.device, memory_format=torch.channels_last, non_blocking=True)
+        self.lq = data['lq'].to(self.device, non_blocking=True)
         if 'gt' in data:
-            self.gt = data['gt'].to(self.device, memory_format=torch.channels_last, non_blocking=True)
+            #self.gt = data['gt'].to(self.device, memory_format=torch.channels_last, non_blocking=True)
+            self.gt = data['gt'].to(self.device, non_blocking=True)
 
         # augmentation
         if self.is_train and self.aug is not None:
