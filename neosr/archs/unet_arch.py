@@ -46,6 +46,7 @@ class unet(nn.Module):
         
         #self.flatten = nn.Flatten()
         #self.activation_end = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        #self.dense_end = nn.LazyLinear(1)
         #self.dense_end = nn.Linear(128*128, 1)
 
     def forward(self, x):

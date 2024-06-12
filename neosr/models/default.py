@@ -72,8 +72,10 @@ class default():
 
         # options var
         train_opt = self.opt['train']
-        self.loss_alpha = 0.999
+        self.normalise_losses = self.opt.get("normalise_losses", False)
+        self.loss_alpha = 0.996
         self.loss_emas  = {}
+        self.prev_emas  = {}
         self.live_emas  = {}
         self.log_dict   = {}
         
@@ -96,17 +98,17 @@ class default():
         self.sched_to_optim = {s : s.optimizer for s in self.schedulers}
 
         self.grad_updates = 0
+        self.grad_updates_g = 0
+        self.grad_updates_d = 0
         self.loss_samples = 0
-        self.scaler_g     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**5)
-        self.scaler_d     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**5)
-        self.accum_loss_g = 0.0
-        self.accum_loss_d = 0.0
+        self.scaler_g     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**20, growth_interval=1000)
+        self.scaler_d     = torch.cuda.amp.GradScaler(enabled=True, init_scale=2.**20, growth_interval=1000)
            
         # initialise counter of how many batches has to be accumulated
-        self.accum_count = 0
-        self.accum_limit = self.opt["datasets"]["train"].get("accumulate", 1) 
-        if self.accum_limit is None or self.accum_limit <= 0:
-            self.accum_limit = 1
+        self.accum_count   = 0
+        self.accum_count_g = 0
+        self.accum_count_d = 0
+        self.accum_limit   = self.opt["datasets"]["train"].get("accumulate", 1) 
 
         # scale ratio var
         self.scale = self.opt['scale'] 
@@ -323,10 +325,15 @@ class default():
             for param_group, lr in zip(optimizer.param_groups, lr_groups, strict=True):
                 param_group['lr'] = lr
 
-    def optimize_parameters(self, current_iter):
+    def optimize_parameters(self, current_iter, tb_logger = None):
 
+        self.optimise_calls += 1
         optimise_start_perf = time.perf_counter()
         optimise_start_time = time.process_time()
+        turn_g = True
+        turn_d = True
+        #turn_g = current_iter % 10 == 0
+        #turn_d = not turn_g
         
         if self.net_d is not None:
             for p in self.net_d.parameters():
@@ -336,13 +343,13 @@ class default():
         self.loss_samples += n_samples
         # increment accumulation counter and check if accumulation limit has been reached
         self.accum_count += 1
-        accum_reached     = self.accum_count >= self.accum_limit
+        self.accum_count_g += turn_g
+        self.accum_count_d += turn_d
         
         # list of loss functions to apply backward() on
         back_losses_g = {}
-        gan_sf = 1.0
-        trim_size = 0
-        
+        trim_size     = 0
+
         def trim_image(x, trim):
             if trim == 0:
                 return x
@@ -354,13 +361,14 @@ class default():
         with torch.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
 
             self.output = self.net_g(self.lq)
-            trimmed_output = trim_image(self.output, trim_size)
-            trimmed_gt     = trim_image(self.gt, trim_size)
+            trim_required  = (self.gt.shape[-1] - self.output.shape[-1]) // 2
+            #trimmed_output = trim_image(self.output, 0)
+            trimmed_gt     = trim_image(self.gt, trim_required)
             # lq match
-            self.lq_interp = F.interpolate(self.lq, scale_factor=self.scale, mode='bicubic')
+            lq_interp = None
 
             # wavelet guided loss
-            if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
+            if self.wavelet_guided.upper() in ("ON", "DISC"):
                 (
                     LL,
                     LH,
@@ -372,13 +380,12 @@ class default():
                     HL_gt,
                     HH_gt,
                     combined_HF_gt,
-                ) = wavelet_guided(self.output, self.gt)
+                ) = wavelet_guided(self.output, trimmed_gt)
 
-            LOSS_SF   = 100.0
             l_g_total = 0.0
             loss_dict = OrderedDict()
 
-            if (current_iter > self.net_d_init_iters and current_iter % self.net_d_iters == 0):
+            if (turn_g and current_iter > self.net_d_init_iters and current_iter % self.net_d_iters == 0):
             
                 # pixel loss
                 if self.cri_pix and self.cri_pix.loss_weight != 0:
@@ -389,12 +396,12 @@ class default():
                         l_g_pix_hh = self.wg_pw_hh * self.cri_pix(HH, HH_gt)
                         loss_pix   = (l_g_pix + l_g_pix_lh + l_g_pix_hl + l_g_pix_hh)
                     else:
-                        loss_pix = self.cri_pix(self.output, self.gt)
+                        loss_pix = self.cri_pix(self.output, trimmed_gt)
                     
                     self.loss_emas['l_g_pix'] = (self.loss_alpha * self.loss_emas.get('l_g_pix', loss_pix.item())) + (1 - self.loss_alpha) * loss_pix.item()
-                    sf                        = LOSS_SF / abs(self.live_emas.get('l_g_pix', self.loss_emas['l_g_pix']))
+                    sf                        = 1.0 / abs(self.live_emas.get('l_g_pix', self.loss_emas['l_g_pix']))
                     l_g_total               += (loss_pix * self.cri_pix.loss_weight)
-                    back_losses_g['l_g_pix'] = (loss_pix * self.cri_pix.loss_weight) * sf
+                    back_losses_g['l_g_pix'] = (loss_pix * self.cri_pix.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_pix']     = loss_pix
                     
                 # ssim loss
@@ -406,107 +413,109 @@ class default():
                         l_g_mssim_hh = self.wg_pw_hh * self.cri_mssim(HH, HH_gt)
                         loss_mssim   = (l_g_mssim + l_g_mssim_lh + l_g_mssim_hl + l_g_mssim_hh)
                     else:
-                        #loss_mssim = self.cri_mssim(self.output, self.gt)
-                        loss_mssim = self.cri_mssim(trimmed_output, trimmed_gt)
+                        loss_mssim = self.cri_mssim(self.output, trimmed_gt)
                         
                     self.loss_emas['l_g_mssim'] = (self.loss_alpha * self.loss_emas.get('l_g_mssim', loss_mssim.item())) + (1 - self.loss_alpha) * loss_mssim.item()
-                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
+                    sf                         = 1.0 / abs(self.live_emas.get('l_g_mssim', self.loss_emas['l_g_mssim']))
                     l_g_total                 += (loss_mssim * self.cri_mssim.loss_weight)
-                    back_losses_g['l_g_mssim'] = (loss_mssim * self.cri_mssim.loss_weight) * sf
+                    back_losses_g['l_g_mssim'] = (loss_mssim * self.cri_mssim.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_mssim']     = loss_mssim
                     
                 # perceptual loss
                 if self.cri_perceptual and self.cri_perceptual.perceptual_weight != 0:
-                    #l_g_percep                  = self.cri_perceptual(self.output, self.gt)
-                    l_g_percep                  = self.cri_perceptual(trimmed_output, trimmed_gt)
-                    trim_image
+                    l_g_percep                  = self.cri_perceptual(self.output, trimmed_gt)
                     self.loss_emas['l_g_percep'] = (self.loss_alpha * self.loss_emas.get('l_g_percep', l_g_percep.item())) + (1 - self.loss_alpha) * l_g_percep.item()
-                    sf                          = LOSS_SF / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
+                    sf                          = 1.0 / abs(self.live_emas.get('l_g_percep', self.loss_emas['l_g_percep']))
                     l_g_total                  += (l_g_percep * self.cri_perceptual.perceptual_weight)
-                    back_losses_g['l_g_percep'] = (l_g_percep * self.cri_perceptual.perceptual_weight) * sf
+                    back_losses_g['l_g_percep'] = (l_g_percep * self.cri_perceptual.perceptual_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_percep']     = l_g_percep
                     
                 # dists loss
                 if self.cri_dists and self.cri_dists.loss_weight != 0:
-                    #l_g_dists                  = self.cri_dists(self.output, self.gt)
-                    l_g_dists                  = self.cri_dists(trimmed_output, trimmed_gt)
+                    l_g_dists                  = self.cri_dists(self.output, trimmed_gt)
                     self.loss_emas['l_g_dists'] = (self.loss_alpha * self.loss_emas.get('l_g_dists', l_g_dists.item())) + (1 - self.loss_alpha) * l_g_dists.item()
-                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
+                    sf                         = 1.0 / abs(self.live_emas.get('l_g_dists', self.loss_emas['l_g_dists']))
                     l_g_total                 += (l_g_dists * self.cri_dists.loss_weight)
-                    back_losses_g['l_g_dists'] = (l_g_dists * self.cri_dists.loss_weight) * sf
+                    back_losses_g['l_g_dists'] = (l_g_dists * self.cri_dists.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_dists']     = l_g_dists
                     
                 # ldl loss
                 if self.cri_ldl and self.cri_ldl.loss_weight != 0:
-                    pixel_weight             = get_refined_artifact_map(self.gt, self.output, 7)
-                    l_g_ldl                  = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
+                    pixel_weight             = get_refined_artifact_map(trimmed_gt, self.output, 7)
+                    l_g_ldl                  = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, trimmed_gt))
                     self.loss_emas['l_g_ldl'] = (self.loss_alpha * self.loss_emas.get('l_g_ldl', l_g_ldl.item())) + (1 - self.loss_alpha) * l_g_ldl.item()
-                    sf                       = LOSS_SF / abs(self.live_emas.get('l_g_ldl', self.loss_emas['l_g_ldl']))
+                    sf                       = 1.0 / abs(self.live_emas.get('l_g_ldl', self.loss_emas['l_g_ldl']))
                     l_g_total               += (l_g_ldl * self.cri_ldl.loss_weight)
-                    back_losses_g['l_g_ldl'] = (l_g_ldl * self.cri_ldl.loss_weight) * sf
+                    back_losses_g['l_g_ldl'] = (l_g_ldl * self.cri_ldl.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_ldl']     = l_g_ldl
                     
                 # focal frequency loss
                 if self.cri_ff and self.cri_ff.loss_weight != 0:
-                    l_g_ff                  = self.cri_ff(self.output, self.gt)
+                    l_g_ff                  = self.cri_ff(self.output, trimmed_gt)
                     self.loss_emas['l_g_ff'] = (self.loss_alpha * self.loss_emas.get('l_g_ff', l_g_ff.item())) + (1 - self.loss_alpha) * l_g_ff.item()
-                    sf                      = LOSS_SF / abs(self.live_emas.get('l_g_ff', self.loss_emas['l_g_ff']))
+                    sf                      = 1.0 / abs(self.live_emas.get('l_g_ff', self.loss_emas['l_g_ff']))
                     l_g_total              += (l_g_ff * self.cri_ff.loss_weight)
-                    back_losses_g['l_g_ff'] = (l_g_ff * self.cri_ff.loss_weight) * sf
+                    back_losses_g['l_g_ff'] = (l_g_ff * self.cri_ff.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_ff']     = l_g_ff
                     
                 # gradient-weighted loss
                 if self.cri_gw and self.cri_gw.loss_weight != 0:
-                    l_g_gw                  = self.cri_gw(self.output, self.gt)
+                    l_g_gw                  = self.cri_gw(self.output, trimmed_gt)
                     self.loss_emas['l_g_gw'] = (self.loss_alpha * self.loss_emas.get('l_g_gw', l_g_gw.item())) + (1 - self.loss_alpha) * l_g_gw.item()
-                    sf                      = LOSS_SF / abs(self.live_emas.get('l_g_gw', self.loss_emas['l_g_gw']))
+                    sf                      = 1.0 / abs(self.live_emas.get('l_g_gw', self.loss_emas['l_g_gw']))
                     l_g_total              += (l_g_gw * self.cri_gw.loss_weight)
-                    back_losses_g['l_g_gw'] = (l_g_gw * self.cri_gw.loss_weight) * sf
+                    back_losses_g['l_g_gw'] = (l_g_gw * self.cri_gw.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_gw']     = l_g_gw
                     
                 # color loss
                 if self.cri_color and self.cri_color.loss_weight != 0:
-                    l_g_color                  = self.cri_color(self.output, self.lq_interp if self.match_lq else self.gt)
+                    if lq_interp is None:
+                        lq_interp = F.interpolate(self.lq, scale_factor=self.scale, mode='bicubic')
+                    l_g_color                  = self.cri_color(self.output, lq_interp if self.match_lq else trimmed_gt)
                     self.loss_emas['l_g_color'] = (self.loss_alpha * self.loss_emas.get('l_g_color', l_g_color.item())) + (1 - self.loss_alpha) * l_g_color.item()
-                    sf                         = LOSS_SF / abs(self.live_emas.get('l_g_color', self.loss_emas['l_g_color']))
+                    sf                         = 1.0 / abs(self.live_emas.get('l_g_color', self.loss_emas['l_g_color']))
                     l_g_total                 += (l_g_color * self.cri_color.loss_weight)
-                    back_losses_g['l_g_color'] = (l_g_color * self.cri_color.loss_weight) * sf
+                    back_losses_g['l_g_color'] = (l_g_color * self.cri_color.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_color']     = l_g_color
                     
                 # luma loss
                 if self.cri_luma and self.cri_luma.loss_weight != 0:
-                    l_g_luma                  = self.cri_luma(self.output, self.lq_interp if self.match_lq else self.gt)
+                    if lq_interp is None:
+                        lq_interp = F.interpolate(self.lq, scale_factor=self.scale, mode='bicubic')
+                    l_g_luma                  = self.cri_luma(self.output, lq_interp if self.match_lq else trimmed_gt)
                     self.loss_emas['l_g_luma'] = (self.loss_alpha * self.loss_emas.get('l_g_luma', l_g_luma.item())) + (1 - self.loss_alpha) * l_g_luma.item()
-                    sf                        = LOSS_SF / abs(self.live_emas.get('l_g_luma', self.loss_emas['l_g_luma']))
+                    sf                        = 1.0 / abs(self.live_emas.get('l_g_luma', self.loss_emas['l_g_luma']))
                     l_g_total                += (l_g_luma * self.cri_luma.loss_weight)
-                    back_losses_g['l_g_luma'] = (l_g_luma * self.cri_luma.loss_weight) * sf
+                    back_losses_g['l_g_luma'] = (l_g_luma * self.cri_luma.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_luma']     = l_g_luma
                     
                 # GAN loss
                 if self.cri_gan and self.cri_gan.loss_weight != 0:
                     fake_g_pred              = self.net_d(self.output)
                     l_g_gan                  = self.cri_gan(fake_g_pred, True, is_disc=False)
+                    #l_g_gan                  = -fake_g_pred.mean()#.mean(0).view(1)
                     self.loss_emas['l_g_gan'] = (self.loss_alpha * self.loss_emas.get('l_g_gan', l_g_gan.item())) + (1 - self.loss_alpha) * l_g_gan.item()
-                    sf                       = LOSS_SF / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
-                    gan_sf = sf
+                    sf                       = 1.0 / abs(self.live_emas.get('l_g_gan', self.loss_emas['l_g_gan']))
                     l_g_total               += (l_g_gan * self.cri_gan.loss_weight)
-                    back_losses_g['l_g_gan'] = (l_g_gan * self.cri_gan.loss_weight) * sf
+                    back_losses_g['l_g_gan'] = (l_g_gan * self.cri_gan.loss_weight) * (sf if self.normalise_losses else 1.0)
                     loss_dict['l_g_gan']     = l_g_gan
         
         for i, (_, loss) in enumerate(back_losses_g.items()):
             is_last_loss = i == len(back_losses_g) - 1
             self.scaler_g.scale(loss / self.accum_limit).backward(retain_graph = not is_last_loss)
             
+        #if len(back_losses_g) <= 1:
+        #    self.normalise_losses = False
+            
         # add total generator loss for tensorboard tracking
         loss_dict['l_g_total'] = l_g_total
-        self.accum_loss_g     += loss_dict['l_g_total'].item() / self.accum_limit
 
         ##########################
         # DISCRIMINATOR
         ##########################
         # optimize net_d
         has_net_d = self.net_d is not None and self.cri_gan and self.cri_gan.loss_weight != 0
-        if has_net_d:
+        if has_net_d and turn_d:
         
             for p in self.net_d.parameters():
                 p.requires_grad = True
@@ -517,7 +526,7 @@ class default():
                 if self.wavelet_guided == "on" or self.wavelet_guided == "disc":
                     real_d_pred = self.net_d(combined_HF_gt)
                 else:
-                    real_d_pred = self.net_d(self.gt)
+                    real_d_pred = self.net_d(trimmed_gt)
                     
                 l_d_real                = self.cri_gan(real_d_pred, True, is_disc=True)
                 loss_dict['l_d_real']   = l_d_real
@@ -532,28 +541,21 @@ class default():
                 l_d_fake                = self.cri_gan(fake_d_pred, False, is_disc=True)
                 loss_dict['l_d_fake']   = l_d_fake
                 loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())
-
+                
             # Compute gradients
-            self.scaler_d.scale(LOSS_SF * l_d_real / self.accum_limit).backward(retain_graph=True)
-            self.scaler_d.scale(LOSS_SF * l_d_fake / self.accum_limit).backward(retain_graph=False)
+            self.scaler_d.scale(l_d_real / self.accum_limit).backward(retain_graph=True)
+            self.scaler_d.scale(l_d_fake / self.accum_limit).backward()
 
             # add total discriminator loss for tensorboard tracking
             loss_dict['l_d_total'] = (l_d_real + l_d_fake) / 2
-            self.accum_loss_d     += loss_dict['l_d_total'] / self.accum_limit
-                
-        if accum_reached:
-            self.accum_count   = 0
+            
+        if self.accum_count >= self.accum_limit:
+            self.accum_count = 0
             self.grad_updates += 1
             
-            if self.grad_updates > 0 and self.grad_updates % 100 == 0:
-                print("="*80)
-                for x, y in self.loss_emas.items():
-                    print("{:<16}{:<16.5f}{:<16.5f}".format(x, self.live_emas.get(x, 0), y))
-                print("Perf: {:.8f}".format(self.optimise_perf / self.optimise_calls))
-                print("Proc: {:.8f}".format(self.optimise_time / self.optimise_calls))
-            
-            self.live_emas = {k : v for k, v in self.loss_emas.items()}
-            
+        if self.accum_count_g >= self.accum_limit:
+            self.accum_count_g = 0
+            self.grad_updates_g += 1
             # Generator
             # gradient clipping on generator
             if self.gradclip:
@@ -563,37 +565,64 @@ class default():
             self.scaler_g.update()
             self.optimizer_g.zero_grad(set_to_none=True)
             self.optim_to_sched[self.optimizer_g].step()
-            self.accum_loss_g = 0.0
             
-            if has_net_d:
-                # Discriminator
-                # gradient clipping on discriminator
-                if self.gradclip:
-                    self.scaler_d.unscale_(self.optimizer_d)
-                    torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1.0, error_if_nonfinite=False)
-                self.scaler_d.step(self.optimizer_d)
-                self.scaler_d.update()
-                self.optimizer_d.zero_grad(set_to_none=True)
-                self.optim_to_sched[self.optimizer_d].step()
-                self.accum_loss_d = 0.0
+            if len(self.prev_emas) == 0:
+                self.prev_emas = {k : v for k, v in self.loss_emas.items()}
+            
+            if self.grad_updates_g > 0 and self.grad_updates_g % 100 == 0:
+                print("="*80)
+                print("{:<16}{:<13}{:<1}{:<13}{:<13}{:<13}".format("Metric", "Previous", "", "Current", "Change", "Change%"))
+                COL_RESET = '\033[0m'
+                for metric, loss_val in self.loss_emas.items():
+                    prev = self.prev_emas.get(metric, loss_val)
+                    chng = loss_val - prev
+                    pct  = loss_val / (1 if prev == 0 else prev) - 1
+                    sign = '+' if chng > 0 else '-'
+                    colcode = '\33[42m' if chng <= 0 else '\33[41m'
+                    print("{:<16}{:<10.5f}{}   {:<13.5f}{:<18}{}{:<11}{}".format(
+                        metric, prev, '\u2192', loss_val, f"{colcode}{sign}{abs(chng):.5f}", COL_RESET, f"{colcode}{sign}{100*abs(pct):.2f}%", COL_RESET))
+                print("Perf: {:.6f}".format(self.optimise_perf / self.optimise_calls))
+                print("Proc: {:.6f}".format(self.optimise_time / self.optimise_calls))
+                self.prev_emas = {k : v for k, v in self.loss_emas.items()}
+            
+            self.live_emas = {k : v for k, v in self.loss_emas.items()}
+            
+            if tb_logger is not None:
+                for metric, loss_val in self.loss_emas.items():
+                    tb_logger.add_scalar(f'emas/{metric}', loss_val, current_iter / self.accum_limit)
+                tb_logger.add_scalar(f'Scalers/Generator', self.scaler_g.get_scale(), current_iter / self.accum_limit)
+                tb_logger.add_scalar(f'Scalers/Discriminator', self.scaler_d.get_scale(), current_iter / self.accum_limit)
+            
+        if self.accum_count_d >= self.accum_limit and has_net_d:
+            self.accum_count_d = 0
+            self.grad_updates_d += 1
+            # Discriminator
+            # gradient clipping on discriminator
+            if self.gradclip:
+                self.scaler_d.unscale_(self.optimizer_d)
+                torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1.0, error_if_nonfinite=False)
+            self.scaler_d.step(self.optimizer_d)
+            self.scaler_d.update()
+            self.optimizer_d.zero_grad(set_to_none=True)
+            self.optim_to_sched[self.optimizer_d].step()
 
         # error if NaN
-        if torch.isnan(l_g_total):
-            msg = """
-                  NaN found, aborting training. Make sure you're using a proper learning rate.
-                  If you have AMP enabled, try using bfloat16. For more information:
-                  https://github.com/muslll/neosr/wiki/Configuration-Walkthrough
-                  """
-            raise ValueError(msg)
+        #if torch.isnan(l_g_total):
+        #    msg = """
+        #          NaN found, aborting training. Make sure you're using a proper learning rate.
+        #          If you have AMP enabled, try using bfloat16. For more information:
+        #          https://github.com/muslll/neosr/wiki/Configuration-Walkthrough
+        #          """
+        #    raise ValueError(msg)
             
         #self.log_dict = self.reduce_loss_dict(loss_dict)
                 
-        for key in loss_dict:
-            self.log_dict[key] = self.log_dict.get(key, 0) + loss_dict[key].item() * n_samples
+        for key, value in loss_dict.items():
+            val = value if type(value) is float else value.item()
+            self.log_dict[key] = self.log_dict.get(key, 0) + val * n_samples
             
         self.optimise_perf += time.perf_counter() - optimise_start_perf
         self.optimise_time += time.process_time() - optimise_start_time
-        self.optimise_calls += 1
 
 
     def update_learning_rate(self, current_iter, warmup_iter=-1):

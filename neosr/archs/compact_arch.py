@@ -33,7 +33,7 @@ class compact(nn.Module):
         self.num_conv = num_conv
         self.upscale = upscale
         self.act_type = act_type
-        self.pad_mode = "replicate"
+        self.pad_mode = "zeros"
         
         #self.num_feat *= self.upscale
         #self.num_conv *= self.upscale
@@ -76,7 +76,7 @@ class compact(nn.Module):
             out = self.upsampler(out)
             
         # add the nearest upsampled image, so that the network learns the residual
-        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
         out += base
         
         return out

@@ -112,8 +112,12 @@ class MessageLogger():
             message += f'{k}: {v:.4e} '
             # tensorboard logger
             if self.use_tb_logger and 'debug' not in self.exp_name:
-                if k.startswith('l_'):
-                    self.tb_logger.add_scalar(f'losses/{k}', v, current_iter)
+                if k.startswith('l_g'):
+                    self.tb_logger.add_scalar(f'Generator Losses/{k}', v, current_iter)
+                elif k.startswith('l_d'):
+                    self.tb_logger.add_scalar(f'Discriminator Losses/{k}', v, current_iter)
+                elif k.upper() in ["OUT_D_FAKE", "OUT_D_REAL"]:
+                    self.tb_logger.add_scalar(f'Discriminator Outputs/{k}', v, current_iter)
                 else:
                     self.tb_logger.add_scalar(k, v, current_iter)
         self.logger.info(message)

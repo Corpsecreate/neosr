@@ -205,3 +205,17 @@ class chc(nn.Module):
             raise NotImplementedError(f"{self.criterion} not implemented.")
 
         return loss
+
+
+@LOSS_REGISTRY.register()
+class wgan(nn.Module):
+
+    def __init__(self) -> None:
+        super(wgan, self).__init__()
+
+    def forward(
+        self, pred: torch.Tensor, target: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        
+        loss = (target * pred).mean()
+        return loss

@@ -2,13 +2,12 @@ from functools import partial
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 
 from neosr.utils.registry import ARCH_REGISTRY
 from neosr.archs.arch_util import net_opt
 
-upscale, training = net_opt()
+upscale, __ = net_opt()
 
 
 class DCCM(nn.Sequential):
@@ -31,7 +30,6 @@ class PLKConv2d(nn.Module):
         self.conv = nn.Conv2d(dim, dim, kernel_size, 1, kernel_size // 2)
         trunc_normal_(self.conv.weight, std=0.02)
         self.idx = dim
-        self.training = training
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
@@ -117,10 +115,8 @@ class realplksr(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        
-        self.upscaling_factor = upscaling_factor
 
-        if not training:
+        if not self.training:
             dropout = 0
 
         self.feats = nn.Sequential(
@@ -130,27 +126,20 @@ class realplksr(nn.Module):
                 for _ in range(n_blocks)
             ]
             + [nn.Dropout2d(dropout)]
-            + [nn.Conv2d(dim, 3 * self.upscaling_factor**2, 3, 1, 1)]
+            + [nn.Conv2d(dim, 3 * upscaling_factor**2, 3, 1, 1)]
         )
         trunc_normal_(self.feats[0].weight, std=0.02)
         trunc_normal_(self.feats[-1].weight, std=0.02)
 
         self.repeat_op = partial(
-            torch.repeat_interleave, repeats=self.upscaling_factor**2, dim=1
+            torch.repeat_interleave, repeats=upscaling_factor**2, dim=1
         )
 
-        self.upscaler = nn.PixelShuffle(self.upscaling_factor)
+        self.to_img = nn.PixelShuffle(upscaling_factor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.feats(x) + self.repeat_op(x)
-        
-        if self.upscaling_factor != 1:
-            out = self.upscaler(out)
-            
-        base = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest-exact')
-        out += base
-        
-        return out
+        x = self.feats(x) + self.repeat_op(x)
+        return self.to_img(x)
 
 
 @ARCH_REGISTRY.register()

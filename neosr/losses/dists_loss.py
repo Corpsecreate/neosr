@@ -80,6 +80,9 @@ class dists(nn.Module):
 
         for param in self.parameters():
             param.requires_grad = False
+            
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1,-1,1,1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1,-1,1,1))
 
         self.chns = [3, 64, 128, 256, 512, 512]
         self.register_parameter(
@@ -106,7 +109,7 @@ class dists(nn.Module):
                 self.beta.data = self.beta.data.cuda()
 
     def forward_once(self, x):
-        h = x
+        h = (x-self.mean)/self.std
         h = self.stage1(h)
         h_relu1_2 = h
         h = self.stage2(h)
@@ -123,27 +126,27 @@ class dists(nn.Module):
     def forward(self, x, y):
         feats0 = self.forward_once(x)
         feats1 = self.forward_once(y)
-        dist1 = 0
-        dist2 = 0
-        c1 = 1e-6
-        c2 = 1e-6
+        dist1  = 0
+        dist2  = 0
+        c1     = 1e-6
+        c2     = 1e-6
 
         w_sum = self.alpha.sum() + self.beta.sum()
         alpha = torch.split(self.alpha / w_sum, self.chns, dim=1)
-        beta = torch.split(self.beta / w_sum, self.chns, dim=1)
+        beta  = torch.split(self.beta / w_sum, self.chns, dim=1)
+        
         for k in range(len(self.chns)):
+        
             x_mean = feats0[k].mean([2, 3], keepdim=True)
             y_mean = feats1[k].mean([2, 3], keepdim=True)
-            S1 = (2 * x_mean * y_mean + c1) / (x_mean**2 + y_mean**2 + c1)
-            dist1 = dist1 + (alpha[k] * S1).sum(1, keepdim=True)
+            S1     = (2 * x_mean * y_mean + c1) / (x_mean**2 + y_mean**2 + c1)
+            dist1  = dist1 + (alpha[k] * S1).sum(1, keepdim=True)
 
-            x_var = ((feats0[k] - x_mean) ** 2).mean([2, 3], keepdim=True)
-            y_var = ((feats1[k] - y_mean) ** 2).mean([2, 3], keepdim=True)
-            xy_cov = (feats0[k] * feats1[k]).mean(
-                [2, 3], keepdim=True
-            ) - x_mean * y_mean
-            S2 = (2 * xy_cov + c2) / (x_var + y_var + c2)
-            dist2 = dist2 + (beta[k] * S2).sum(1, keepdim=True)
+            x_var  = ((feats0[k] - x_mean) ** 2).mean([2, 3], keepdim=True)
+            y_var  = ((feats1[k] - y_mean) ** 2).mean([2, 3], keepdim=True)
+            xy_cov = (feats0[k] * feats1[k]).mean([2, 3], keepdim=True) - x_mean * y_mean
+            S2     = (2 * xy_cov + c2) / (x_var + y_var + c2)
+            dist2  = dist2 + (beta[k] * S2).sum(1, keepdim=True)
 
         if self.as_loss:
             out = 1 - (dist1 + dist2).mean()

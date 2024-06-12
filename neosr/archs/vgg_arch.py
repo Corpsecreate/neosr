@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 import torch
 from torch import nn
+from torchvision import models, transforms
 from torchvision.models import vgg
 from torchvision.models import VGG19_Weights
 
@@ -127,11 +128,11 @@ class VGGFeatureExtractor(nn.Module):
             '''
 
             # the mean is for image with range [0, 1]
-            self.register_buffer('mean', torch.tensor(
-                [0.5, 0.5, 0.5], device='cuda').view(1, 3, 1, 1))
+            self.register_buffer('mean', torch.tensor([0.5, 0.5, 0.5], device='cuda').view(1, 3, 1, 1))
             # the std is for image with range [0, 1]
-            self.register_buffer('std', torch.tensor(
-                [0.25, 0.25, 0.25], device='cuda').view(1, 3, 1, 1))
+            self.register_buffer('std', torch.tensor([0.25, 0.25, 0.25], device='cuda').view(1, 3, 1, 1))
+            self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                  std=[0.229, 0.224, 0.225])
 
 
     def forward(self, x):
@@ -146,7 +147,8 @@ class VGGFeatureExtractor(nn.Module):
         if self.range_norm:
             x = (x + 1) / 2
         if self.use_input_norm:
-            x = (x - self.mean) / self.std
+            #x = (x - self.mean) / self.std
+            x = self.normalize(x)
 
         output = {}
         for key, layer in self.vgg_net._modules.items():

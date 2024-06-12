@@ -1,6 +1,6 @@
 from torch import nn
 
-from neosr.losses.basic_loss import chc
+from neosr.losses.basic_loss import chc, wgan
 from neosr.utils.registry import LOSS_REGISTRY
 
 
@@ -38,6 +38,8 @@ class GANLoss(nn.Module):
             self.loss = nn.HuberLoss()
         elif self.gan_type == "chc":
             self.loss = chc()
+        elif self.gan_type == "wgan":
+            self.loss = wgan()
         else:
             raise NotImplementedError(f"GAN type {self.gan_type} is not implemented.")
 
@@ -53,7 +55,10 @@ class GANLoss(nn.Module):
                 return Tensor.
         """
 
-        target_val = self.real_label_val if target_is_real else self.fake_label_val
+        if self.gan_type == "wgan":
+            target_val = -1.0 if target_is_real else 1.0
+        else:
+            target_val = self.real_label_val if target_is_real else self.fake_label_val
         return input.new_ones(input.size()) * target_val
 
     def forward(self, input, target_is_real, is_disc=False):

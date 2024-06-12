@@ -171,6 +171,8 @@ class PerceptualLoss(nn.Module):
        
         for k, v in self.manual_wgts.items():
             self.manual_wgts[k] = v.unsqueeze(-1).unsqueeze(-1).cuda()
+            
+        self.norm_stats = {}
 
     def forward(
         self, x: torch.Tensor, gt: torch.Tensor
@@ -191,9 +193,36 @@ class PerceptualLoss(nn.Module):
 
         # calculate perceptual loss
         if self.perceptual_weight != 0:
+        
             for k in x_features.keys():
+            
                 if self.layer_weights[k] == 0:
-                    continue
+                    continue  
+                
+                shp    = gt_features[k].shape
+                n_chan = shp[1]
+                cnt    = shp[0] * shp[2] * shp[3]
+                tot    = gt_features[k].sum([0, 2, 3])
+                tot_sq = gt_features[k].square().sum([0, 2, 3])
+                
+                if k not in self.norm_stats:
+                    self.norm_stats[k] = {'sum' : tot, 'sum_sq' : tot_sq, 'count' : cnt}
+                else:
+                    self.norm_stats[k]['sum']    += tot
+                    self.norm_stats[k]['sum_sq'] += tot_sq
+                    self.norm_stats[k]['count']  += cnt
+                
+                mu       = self.norm_stats[k]['sum'] / self.norm_stats[k]['count']
+                var      = (self.norm_stats[k]['sum_sq'] / self.norm_stats[k]['count']) - mu.square()
+                std      = var.sqrt()
+                std      = torch.where(std > 0, std, 1.0)
+                mu_view  = mu.view(1,-1,1,1)
+                std_view = std.view(1,-1,1,1)
+                #print("{:<16}{}{}".format(k, mu, std))
+                #print("="*80)
+                x_scaled  = (x_features[k] - mu_view) / std_view
+                gt_scaled = (gt_features[k] - mu_view) / std_view
+                
                 if False and k in self.manual_wgts:
                     #print(gt_features[k].shape)
                     spec = self.manual_wgts[k]#.unsqueeze(-1).unsqueeze(-1).cuda()
@@ -203,5 +232,6 @@ class PerceptualLoss(nn.Module):
                     percep_loss += self.layer_weights[k] * torch.linalg.norm(x_features[k] - gt_features[k])
                 else:
                     percep_loss += self.layer_weights[k] * self.criterion(x_features[k], gt_features[k])
+                    #percep_loss += (self.layer_weights[k] * self.criterion(x_scaled, gt_scaled))
 
         return percep_loss

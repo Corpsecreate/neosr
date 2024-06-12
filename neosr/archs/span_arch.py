@@ -5,9 +5,9 @@ import torch.nn.functional as F
 from torch import nn
 
 from neosr.utils.registry import ARCH_REGISTRY
-from .arch_util import net_opt
+from neosr.archs.arch_util import net_opt
 
-upscale, training = net_opt()
+upscale, __ = net_opt()
 
 
 def _make_pair(value):
@@ -30,8 +30,7 @@ def conv_layer(in_channels,
                      out_channels,
                      kernel_size,
                      padding=padding,
-                     bias=bias,
-                     padding_mode="replicate")
+                     bias=bias)
 
 
 def activation(act_type, inplace=True, neg_slope=0.05, n_prelu=1):
@@ -109,16 +108,15 @@ class Conv3XC(nn.Module):
         self.stride = s
         self.has_relu = relu
         gain = gain1
-        self.training = training
 
-        self.sk = nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=1, padding=0, stride=s, bias=bias, padding_mode="replicate")
+        self.sk = nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=1, padding=0, stride=s, bias=bias)
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels=c_in, out_channels=c_in * gain, kernel_size=1, padding=0, bias=bias, padding_mode="replicate"),
-            nn.Conv2d(in_channels=c_in * gain, out_channels=c_out * gain, kernel_size=3, stride=s, padding=0, bias=bias, padding_mode="replicate"),
-            nn.Conv2d(in_channels=c_out * gain, out_channels=c_out, kernel_size=1, padding=0, bias=bias, padding_mode="replicate"),
+            nn.Conv2d(in_channels=c_in, out_channels=c_in * gain, kernel_size=1, padding=0, bias=bias),
+            nn.Conv2d(in_channels=c_in * gain, out_channels=c_out * gain, kernel_size=3, stride=s, padding=0, bias=bias),
+            nn.Conv2d(in_channels=c_out * gain, out_channels=c_out, kernel_size=1, padding=0, bias=bias),
         )
 
-        self.eval_conv = nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=3, padding=1, stride=s, bias=bias, padding_mode="replicate")
+        self.eval_conv = nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=3, padding=1, stride=s, bias=bias)
 
         if self.training is False:
             self.eval_conv.weight.requires_grad = False
@@ -133,10 +131,10 @@ class Conv3XC(nn.Module):
         w3 = self.conv[2].weight.data.clone().detach()
         b3 = self.conv[2].bias.data.clone().detach()
 
-        w = F.conv2d(w1.flip(2, 3).permute(1, 0, 2, 3), w2, padding=2, stride=1, padding_mode="replicate").flip(2, 3).permute(1, 0, 2, 3)
+        w = F.conv2d(w1.flip(2, 3).permute(1, 0, 2, 3), w2, padding=2, stride=1).flip(2, 3).permute(1, 0, 2, 3)
         b = (w2 * b1.reshape(1, -1, 1, 1)).sum((1, 2, 3)) + b2
 
-        self.weight_concat = F.conv2d(w.flip(2, 3).permute(1, 0, 2, 3), w3, padding=0, stride=1, padding_mode="replicate").flip(2, 3).permute(1, 0, 2, 3)
+        self.weight_concat = F.conv2d(w.flip(2, 3).permute(1, 0, 2, 3), w3, padding=0, stride=1).flip(2, 3).permute(1, 0, 2, 3)
         self.bias_concat = (w3 * b.reshape(1, -1, 1, 1)).sum((1, 2, 3)) + b3
 
         sk_w = self.sk.weight.data.clone().detach()
@@ -219,7 +217,6 @@ class span(nn.Module):
                  ):
         super(span, self).__init__()
 
-        self.upscale = upscale
         in_channels = num_in_ch
         out_channels = num_out_ch
         self.img_range = img_range
@@ -249,7 +246,6 @@ class span(nn.Module):
         return self.no_norm is None
 
     def forward(self, x):
-    
         if self.is_norm:
             self.mean = self.mean.type_as(x)
             x = (x - self.mean) * self.img_range
@@ -267,10 +263,5 @@ class span(nn.Module):
         out_b6 = self.conv_2(out_b6)
         out = self.conv_cat(torch.cat([out_feature, out_b6, out_b1, out_b5_2], 1))
         output = self.upsampler(out)
-            
-        # add the nearest upsampled image, so that the network learns the residual
-        base    = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
-        output += base
 
         return output
-
