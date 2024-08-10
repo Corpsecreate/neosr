@@ -246,6 +246,111 @@ class PadAndMask(torch.nn.Module):
                 mask = 1 - self.padder_mask(ones)
                 out = torch.cat((out, mask), dim=1)
         return out
+        
+class TrainedPadder(torch.nn.Module):
+
+    def __init__(self, channels_in, pad_size, kernel_size=3):
+    
+        super(TrainedPadder, self).__init__()
+        self.channels_in = channels_in
+        self.pad_size    = pad_size
+        self.kernel_size = kernel_size
+        self.corner_size = self.pad_size**2 + 2*self.pad_size*(self.kernel_size//2)
+        
+        self.conv_u = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_d = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_l = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_r = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        
+        self.conv_u.weight = torch.nn.Parameter((1.0 / self.kernel_size ** 2 / self.channels_in) * torch.ones_like(self.conv_u.weight))
+        self.conv_d.weight = torch.nn.Parameter((1.0 / self.kernel_size ** 2 / self.channels_in) * torch.ones_like(self.conv_d.weight))
+        self.conv_l.weight = torch.nn.Parameter((1.0 / self.kernel_size ** 2 / self.channels_in) * torch.ones_like(self.conv_l.weight))
+        self.conv_r.weight = torch.nn.Parameter((1.0 / self.kernel_size ** 2 / self.channels_in) * torch.ones_like(self.conv_r.weight))
+        
+        self.conv_u.bias = torch.nn.Parameter(torch.zeros_like(self.conv_u.bias))
+        self.conv_d.bias = torch.nn.Parameter(torch.zeros_like(self.conv_d.bias))
+        self.conv_l.bias = torch.nn.Parameter(torch.zeros_like(self.conv_l.bias))
+        self.conv_r.bias = torch.nn.Parameter(torch.zeros_like(self.conv_r.bias))
+        
+        self.conv_ul = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_ur = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_bl = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        self.conv_br = nn.Conv2d(self.channels_in, self.channels_in, self.kernel_size, stride=1)
+        
+         
+        self.fc_in       = self.channels_in * (self.pad_size + self.kernel_size)**2
+        self.fc_out      = self.channels_in * self.corner_size
+        self.fc_grid     = round((self.fc_in / self.channels_in)**0.5)
+        self.dense_ul    = nn.Linear(self.fc_in, self.fc_out, bias=False)
+        self.dense_ur    = nn.Linear(self.fc_in, self.fc_out, bias=False)
+        self.dense_bl    = nn.Linear(self.fc_in, self.fc_out, bias=False)
+        self.dense_br    = nn.Linear(self.fc_in, self.fc_out, bias=False)
+        self.zero_padder = nn.ConstantPad2d(pad_size, 0)
+
+    def forward(self, x):
+    
+        if self.pad_size == 0:
+            out = x
+            
+        else:
+            
+            p = self.pad_size
+            k = self.kernel_size
+            s = p + k // 2
+            
+            out      = self.zero_padder(x)
+            filter_u = self.conv_u(x[:, :, :k + p - 1, :])
+            filter_d = self.conv_d(x[:, :, -(k + p - 1): ,:])
+            filter_l = self.conv_l(x[:, :, :, :k + p - 1])
+            filter_r = self.conv_r(x[:, :, :, -(k + p - 1):])
+
+            out[:, :, 0:p, s:out.shape[3]-s] = filter_u[:, :, :, :]
+            out[:, :, -p:, s:out.shape[3]-s] = filter_d[:, :, :, :]
+            out[:, :, s:out.shape[2]-s, 0:p] = filter_l[:, :, :, :]
+            out[:, :, s:out.shape[2]-s, -p:] = filter_r[:, :, :, :]
+            
+            filter_ul = self.conv_ul(x[:, :, :k+s-1, :k+s-1])
+            filter_ur = self.conv_ur(x[:, :, :k+s-1, -k-s+1:])
+            filter_bl = self.conv_bl(x[:, :, -k-s+1:, :k+s-1])
+            filter_br = self.conv_br(x[:, :, -k-s+1:, -k-s+1:])
+            
+            # UL
+            out[:, :, :p, :s]    = filter_ul[:,:, :p, :s]
+            out[:, :, p:s, :p]   = filter_ul[:,:, p:s, :p]
+            # UR
+            out[:, :, :p, -s:]   = filter_ur[:,:, :p, -s:]
+            out[:, :, p:s, -p:]  = filter_ur[:,:, p:s, -p:]
+            # BL
+            out[:, :, -p:, :s]   = filter_bl[:,:, -p:, :s]
+            out[:, :, -s:-p, :p] = filter_bl[:, :, -s:-p, :p]
+            # BR
+            out[:, :, -p:, -s:]  = filter_br[:,:, -p:, -s:]
+            out[:, :, -s:-p, -p:] = filter_br[:, :, -s:-p, -p:]
+            
+            '''
+            SZ     = self.fc_grid
+            UL_pix = out[:, :, 0:SZ, 0:SZ]
+            UR_pix = out[:, :, -SZ:, -SZ:]
+            BL_pix = out[:, :, out.shape[2]-SZ:, 0:SZ]
+            BR_pix = out[:, :, out.shape[2]-SZ:, out.shape[3]-SZ:]
+            
+            b      = x.shape[0]
+            UL_out = self.dense_ul(UL_pix.reshape(b, self.fc_in)).view(b, self.channels_in, self.pad_size, -1)
+            UR_out = self.dense_ur(UR_pix.reshape(b, self.fc_in)).view(b, self.channels_in, self.pad_size, -1)
+            BL_out = self.dense_bl(BL_pix.reshape(b, self.fc_in)).view(b, self.channels_in, self.pad_size, -1)
+            BR_out = self.dense_br(BR_pix.reshape(b, self.fc_in)).view(b, self.channels_in, self.pad_size, -1)
+            
+            out[:, :, 0:self.pad_size, 0:self.pad_size+offset]                 = UL_out[:, :, :, 0:(self.pad_size+offset)]
+            out[:, :, self.pad_size:self.pad_size+offset, 0:self.pad_size]     = UL_out[:, :, :, (self.pad_size+offset):].permute(0,1,3,2)
+            out[:, :, 0:self.pad_size, -(self.pad_size+offset):]               = UR_out[:, :, :, 0:(self.pad_size+offset)]
+            out[:, :, self.pad_size:self.pad_size+offset, -(self.pad_size):]   = UR_out[:, :, :, (self.pad_size+offset):].permute(0,1,3,2)
+            out[:, :, -self.pad_size:, 0:self.pad_size+offset]                 = BL_out[:, :, :, 0:(self.pad_size+offset)]
+            out[:, :, -(self.pad_size+offset):-self.pad_size, 0:self.pad_size] = BL_out[:, :, :, (self.pad_size+offset):].permute(0,1,3,2)
+            out[:, :, -self.pad_size:, -(self.pad_size+offset):]               = BR_out[:, :, :, 0:(self.pad_size+offset)]
+            out[:, :, -(self.pad_size+offset):-self.pad_size, -self.pad_size:] = BR_out[:, :, :, (self.pad_size+offset):].permute(0,1,3,2)
+            '''
+                
+        return out
 
 
 to_1tuple = _ntuple(1)

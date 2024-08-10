@@ -42,6 +42,7 @@ class PerceptualLoss(nn.Module):
         **kwargs,
     ) -> None:
         super(PerceptualLoss, self).__init__()
+        self.loss_weight       = perceptual_weight
         self.perceptual_weight = perceptual_weight
         self.layer_weights = layer_weights
 
@@ -54,11 +55,11 @@ class PerceptualLoss(nn.Module):
 
         self.criterion_type = criterion
         if self.criterion_type == "l1":
-            self.criterion = nn.L1Loss()
+            self.criterion = nn.L1Loss(reduction='none')
         elif self.criterion_type == "l2":
-            self.criterion = nn.MSELoss()
+            self.criterion = nn.MSELoss(reduction='none')
         elif self.criterion_type == "huber":
-            self.criterion = nn.HuberLoss()
+            self.criterion = nn.HuberLoss(reduction='none')
         elif self.criterion_type == "fro":
             self.criterion = None
         else:
@@ -173,6 +174,7 @@ class PerceptualLoss(nn.Module):
             self.manual_wgts[k] = v.unsqueeze(-1).unsqueeze(-1).cuda()
             
         self.norm_stats = {}
+        self.image_count = 0
 
     def forward(
         self, x: torch.Tensor, gt: torch.Tensor
@@ -188,7 +190,8 @@ class PerceptualLoss(nn.Module):
         """
         # extract vgg features
         x_features  = self.vgg(x)
-        gt_features = self.vgg(gt.detach())
+        with torch.inference_mode():
+            gt_features = self.vgg(gt.detach())
         percep_loss = 0.0
 
         # calculate perceptual loss
@@ -199,19 +202,23 @@ class PerceptualLoss(nn.Module):
                 if self.layer_weights[k] == 0:
                     continue  
                 
-                shp    = gt_features[k].shape
-                n_chan = shp[1]
-                cnt    = shp[0] * shp[2] * shp[3]
-                tot    = gt_features[k].sum([0, 2, 3])
-                tot_sq = gt_features[k].square().sum([0, 2, 3])
+                if self.image_count < 30000:
                 
-                if k not in self.norm_stats:
-                    self.norm_stats[k] = {'sum' : tot, 'sum_sq' : tot_sq, 'count' : cnt}
-                else:
-                    self.norm_stats[k]['sum']    += tot
-                    self.norm_stats[k]['sum_sq'] += tot_sq
-                    self.norm_stats[k]['count']  += cnt
-                
+                    shp    = gt_features[k].shape
+                    n_chan = shp[1]
+                    cnt    = shp[0] * shp[2] * shp[3]
+                    tot    = gt_features[k].sum([0, 2, 3])
+                    tot_sq = gt_features[k].square().sum([0, 2, 3])
+                    
+                    if k not in self.norm_stats:
+                        self.norm_stats[k] = {'sum' : tot, 'sum_sq' : tot_sq, 'count' : cnt}
+                    else:
+                        self.norm_stats[k]['sum']    += tot
+                        self.norm_stats[k]['sum_sq'] += tot_sq
+                        self.norm_stats[k]['count']  += cnt
+                    
+                    self.image_count += shp[0]
+                    
                 mu       = self.norm_stats[k]['sum'] / self.norm_stats[k]['count']
                 var      = (self.norm_stats[k]['sum_sq'] / self.norm_stats[k]['count']) - mu.square()
                 std      = var.sqrt()
@@ -231,7 +238,10 @@ class PerceptualLoss(nn.Module):
                     # note: linalg.norm uses Frobenius norm by default
                     percep_loss += self.layer_weights[k] * torch.linalg.norm(x_features[k] - gt_features[k])
                 else:
-                    percep_loss += self.layer_weights[k] * self.criterion(x_features[k], gt_features[k])
+                    #percep_loss += self.layer_weights[k] * self.criterion(x_features[k], gt_features[k])
                     #percep_loss += (self.layer_weights[k] * self.criterion(x_scaled, gt_scaled))
+                    #error = torch.mean(self.criterion(x_scaled, gt_scaled), dim=(0,2,3)).mean()
+                    error = torch.mean(self.criterion(x_scaled, gt_scaled))
+                    percep_loss += self.layer_weights[k] * error
 
         return percep_loss

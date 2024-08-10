@@ -1,8 +1,9 @@
+import torch
 from torch import nn
 
 from neosr.losses.basic_loss import chc, wgan
 from neosr.utils.registry import LOSS_REGISTRY
-
+#from torchvision.transforms.v2 import GaussianNoise
 
 @LOSS_REGISTRY.register()
 class GANLoss(nn.Module):
@@ -29,9 +30,21 @@ class GANLoss(nn.Module):
         self.loss_weight = loss_weight
         self.real_label_val = real_label_val
         self.fake_label_val = fake_label_val
+        
+        self.losses_bcelogit = nn.BCEWithLogitsLoss()
+        self.losses_bce = nn.BCELoss()
+        self.losses_mse = nn.MSELoss()
+        self.losses_huber = nn.HuberLoss()
+        self.losses_chc = chc()
 
         if self.gan_type == "vanilla":
             self.loss = nn.BCEWithLogitsLoss()
+        elif self.gan_type == "nsgan":
+            self.loss = None
+        elif self.gan_type == "rsgan":
+            self.loss = nn.BCEWithLogitsLoss()
+        elif self.gan_type == "bce":
+            self.loss = nn.BCELoss()
         elif self.gan_type == "lsgan":
             self.loss = nn.MSELoss()
         elif self.gan_type == "huber":
@@ -42,6 +55,8 @@ class GANLoss(nn.Module):
             self.loss = wgan()
         else:
             raise NotImplementedError(f"GAN type {self.gan_type} is not implemented.")
+            
+        #self.noise_layer = GaussianNoise(mean=0.0, sigma=0.005, clip=True)
 
     def get_target_label(self, input, target_is_real):
         """Get target label.
@@ -61,10 +76,10 @@ class GANLoss(nn.Module):
             target_val = self.real_label_val if target_is_real else self.fake_label_val
         return input.new_ones(input.size()) * target_val
 
-    def forward(self, input, target_is_real, is_disc=False):
+    def forward(self, x, target_is_real, is_disc=False):
         """
         Args:
-            input (Tensor): The input for the loss module, i.e., the network
+            x (Tensor): The input for the loss module, i.e., the network
                 prediction.
             target_is_real (bool): Whether the targe is real or fake.
             is_disc (bool): Whether the loss for discriminators or not.
@@ -73,8 +88,41 @@ class GANLoss(nn.Module):
         Returns:
             Tensor: GAN loss value.
         """
-        target_label = self.get_target_label(input, target_is_real)
-        loss = self.loss(input, target_label)
+        
+        x_mu = x.mean()
+        if self.gan_type == "vanilla":
+            if is_disc:
+                loss = self.losses_bcelogit(x_mu/1e1, torch.ones_like(x_mu) * (0.9 if target_is_real else 0.0))
+            else:
+                loss = self.losses_bcelogit(x_mu/1e1, torch.ones_like(x_mu) * (1.0 if target_is_real else 0.0))
+        
+        elif self.gan_type == "lsgan":
+            if is_disc:
+                loss = self.losses_mse(torch.sigmoid(x_mu/1e1), torch.ones_like(x_mu) * (1.0 if target_is_real else 0.0))
+            else:
+                loss = self.losses_mse(torch.sigmoid(x_mu/1e1), torch.ones_like(x_mu) * (1.0 if target_is_real else 0.0))
+                
+        elif self.gan_type == "nsgan":
+            if is_disc:
+                if target_is_real:
+                    loss = -torch.mean(torch.log(torch.sigmoid(x_mu/1e1) + 1e-7))
+                else:
+                    loss = -torch.mean(torch.log(1 - torch.sigmoid(x_mu/1e1) + 1e-7))
+            else:
+                loss = -torch.mean(torch.log(torch.sigmoid(x_mu/1e1) + 1e-7))
+                
+        elif self.gan_type == "wgan":
+            if is_disc:
+                if target_is_real:
+                    loss = -x_mu
+                else:
+                    loss = x_mu
+            else:
+                loss = -x_mu
+                
+        else:
+            target_label = self.get_target_label(x, target_is_real)
+            loss = self.loss(x, target_label)
 
         # loss_weight is always 1.0 for discriminators
         return loss

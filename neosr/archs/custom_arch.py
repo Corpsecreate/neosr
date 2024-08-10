@@ -2,10 +2,11 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torchvision import transforms
 
 from neosr.utils.registry import ARCH_REGISTRY
 from .arch_util import net_opt
-from .arch_util import PadAndMask
+from .arch_util import PadAndMask, TrainedPadder
 
 upscale, training = net_opt()
 
@@ -26,191 +27,191 @@ class custom(nn.Module):
         act_type (str): Activation type, options: 'relu', 'prelu', 'leakyrelu'. Default: prelu.
     """
 
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=96, num_head=1, num_body=12, num_tail=1, upscale=upscale, act_type='prelu', **kwargs):
+    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=128, num_conv=6, upscale=upscale, act_type='prelu', **kwargs):
+    
         super(custom, self).__init__()
-        self.num_in_ch  = num_in_ch
+        self.num_in_ch = num_in_ch
         self.num_out_ch = num_out_ch
-        self.num_feat   = num_feat
-        self.num_body   = num_body
-        self.num_head   = num_head
-        self.num_tail   = num_tail
-        self.upscale    = upscale
-        self.act_type   = act_type
-        self.pad_mode   = "zeros"
-        PAD_CONSTANT    = 0.0
-        self.pad_fill   = False
-        self.pad_mask   = False
+        self.num_feat = num_feat
+        self.num_conv = num_conv
+        self.upscale = upscale
+        self.act_type = act_type
+        self.pad_mode = "zeros"
+        self.pad_fill = False
+        self.pad_mask = False
         
-        self.head = nn.ModuleList()
-        self.body = nn.ModuleList()
-        self.tail = nn.ModuleList()
-        self.end  = nn.ModuleList()
+        self.normalize = transforms.Normalize(mean=[0.500, 0.500, 0.500],
+                                              std =[0.250, 0.250, 0.250])
         
         def get_activation(num_channels):
             if self.act_type == 'relu':
                 activation = nn.ReLU(inplace=True)
             elif self.act_type == 'prelu':
-                #activation = nn.PReLU(num_parameters=num_channels)
                 activation = nn.PReLU(num_parameters=num_channels)
             elif self.act_type == 'leakyrelu':
                 activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
             return activation
         
-        
+        self.total_padding = 0
+
+        self.body = nn.ModuleList()
         # the first conv
-        init_k       = 1
-        n_feat_in    = num_in_ch + int(self.pad_mask)
-        num_out_head = n_feat_in * 4
-        padding_needed = 0
+        #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
         
-        for i in range(self.num_head):
-            padding     = init_k // 2
-            padding_needed += padding
-            in_offset   = 0 if (not self.pad_mask or padding == 0) else 1
-            #if padding > 0:
-                #self.head.append(nn.ConstantPad2d(padding, PAD_CONSTANT))
-                #self.head.append(PadAndMask(padding, PAD_CONSTANT, fill=self.pad_fill, include_mask=self.pad_mask))
-            self.head.append(nn.Conv2d(n_feat_in, num_out_head, init_k))#, 1, init_k//2, padding_mode=self.pad_mode))
-            # the first activation
-            activation = get_activation(num_out_head)
-            self.head.append(activation)
-            n_feat_in = num_out_head
+        k = 1; self.total_padding += k // 2
+        nf_in  = self.num_in_ch
+        nf_out = self.num_feat
+        #if k//2 > 0: self.body.append(nn.ConstantPad2d(k//2, 0.0))
+        if k//2 > 0: self.body.append(TrainedPadder(nf_in, k//2))
+        self.body.append(nn.Conv2d(nf_in + self.pad_mask, nf_out, k, 1, 0, padding_mode = self.pad_mode))
+        # the first activation
+        self.body.append(get_activation(nf_out))
+        
+        nf_in = nf_out
 
-        #n_feat_in = num_out_head
         # the body structure
-        for i in range(self.num_body):
-            n_feat_next = n_feat_in
-            k           = 3 if i % 2 == 0 else 3
-            padding     = k // 2
-            padding_needed += padding
-            in_offset   = 0 if (not self.pad_mask or padding == 0) else 1
-            #k = 11#2*(i % 4)+1
-            #if padding > 0:
-                #self.body.append(nn.ConstantPad2d(padding, PAD_CONSTANT))
-                #self.body.append(PadAndMask(padding, PAD_CONSTANT, fill=self.pad_fill, include_mask=self.pad_mask))
-            self.body.append(nn.Conv2d(n_feat_in, n_feat_next, k))#, 1, padding, padding_mode=self.pad_mode))
+        for i in range(self.num_conv):
+            #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
+            k = 5; self.total_padding += k // 2
+            nf_out = nf_in# * (2 if i > 0 and i % 2 == 0 else 1)
+            #if k//2 > 0: self.body.append(nn.ConstantPad2d(k//2, 0.0))
+            if k//2 > 0: self.body.append(TrainedPadder(nf_in, k//2))
+            self.body.append(nn.Conv2d(nf_in + self.pad_mask, nf_out, k, 1, 0, padding_mode = self.pad_mode))
             # activation
-            activation = get_activation(n_feat_next)
-            #self.body.append(nn.BatchNorm2d(num_feat, momentum=0.10))
-            self.body.append(activation)
-            n_feat_in = n_feat_next
-            
-            #if i > 0 and i % 3 == 0 and (num_body - i) >= 0:
-            #    self.body.append(nn.BatchNorm2d(num_feat, momentum=0.20))
-            
-        #n_feat_in += num_out_head + self.num_in_ch
-        for i in range(self.num_tail):
-            n_feat_next = max(num_out_ch * upscale ** 2 * 2, int(n_feat_in * 0.75))
-            k           = 1
-            padding     = k // 2
-            padding_needed += padding
-            in_offset   = 0 if (not self.pad_mask or padding == 0) else 1
-            #if padding > 0:
-                #self.tail.append(nn.ConstantPad2d(padding, PAD_CONSTANT))
-                #self.tail.append(PadAndMask(padding, PAD_CONSTANT, fill=self.pad_fill, include_mask=self.pad_mask))
-            self.tail.append(nn.Conv2d(n_feat_in, n_feat_next, k))#, 1, padding, padding_mode=self.pad_mode))
-            
-            # activation
-            activation = get_activation(n_feat_next)
-            self.tail.append(activation)
-            n_feat_in = n_feat_next
+            self.body.append(get_activation(nf_out))
+            nf_in = nf_out
 
         # the last conv
-        #self.body.append(nn.Conv2d(num_feat, num_out_ch *
-        #                 upscale * upscale, 3, 1, 1))
-        
-        # the last conv
-        
-        k           = 1
-        padding     = k // 2
-        padding_needed += padding
-        in_offset   = 0 if (not self.pad_mask or padding == 0) else 1
-        #if padding > 0:
-            #self.end.append(PadAndMask(padding, PAD_CONSTANT, fill=self.pad_fill, include_mask=self.pad_mask))
-        self.end.append(nn.Conv2d(n_feat_in, num_out_ch * self.upscale ** 2, k))
-        #self.concat_conv = nn.Conv2d(n_feat_in + in_offset, num_out_ch * self.upscale ** 2, k)#, 1, 1, padding_mode=self.pad_mode)
-        
-        #self.padder = PadAndMask(padding_needed, 0.0, fill=self.pad_fill, include_mask=self.pad_mask)
-        self.padder = None
+        #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
+        k = 1; self.total_padding += k // 2
+        #if k//2 > 0: self.body.append(nn.ConstantPad2d(k//2, 0.0))
+        if k//2 > 0: self.body.append(TrainedPadder(nf_in, k//2))
+        self.body.append(nn.Conv2d(nf_in + self.pad_mask, self.num_out_ch * self.upscale ** 2, k, 1, 0, padding_mode = self.pad_mode))
         # upsample
-        self.upsampler = nn.PixelShuffle(upscale)
+        self.upsampler = nn.PixelShuffle(self.upscale)
+        # padder at inference
+        self.padder = PadAndMask(self.total_padding, 0.0, True, self.pad_mask)
 
     def forward(self, x):
-        
-        #if upscale == 1:
-        #    base = x
-        #else:
-        #    base = F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
-        
-        #base = x
-        #out  = x
-        
-        if self.training:
+    
+        #interp = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='bilinear')
+        if True:#self.training:
             out = x
         else:
-        
-            if self.padder is None:
-            
-                out = x
-                # Head
-                for i in range(0, len(self.head)):
-                    out = self.head[i](out)
-                head_out = out
-                
-                # Body            
-                for i in range(0, len(self.body)):
-                    out = self.body[i](out)
-                    
-                #out = torch.cat((out, head_out, base), 1)
-                
-                # Tail
-                for i in range(0, len(self.tail)):
-                    out = self.tail[i](out)
-                    
-                # End
-                for i in range(0, len(self.end)):
-                    out = self.end[i](out)
-                    
-                padding_needed = (x.shape[2] - out.shape[2]) // 2
-                self.padder    = PadAndMask(padding_needed, 0.0, fill=True, include_mask=False)
-                
             out = self.padder(x)
+            
+        out = self.normalize(x)
         
-        #out = self.padder(x)
-        
-        # Head
-        for i in range(0, len(self.head)):
-            out = self.head[i](out)
-        head_out = out
-        
-        # Body            
         for i in range(0, len(self.body)):
             out = self.body[i](out)
             
-        #out = torch.cat((out, head_out, base), 1)
-        
-        # Tail
-        for i in range(0, len(self.tail)):
-            out = self.tail[i](out)
-            
-        # End
-        for i in range(0, len(self.end)):
-            out = self.end[i](out)
-        
-        #out = torch.cat((x, out), 1)
-        #out = self.padder_last(out)
-        #out = self.concat_conv(out)
-        #out = self.last_active(out)
-        #out = self.last_conv(out)
-
-        out  = self.upsampler(out)
-        #if upscale == 1:
-        #    base = x
-        #else:
-        #    #base = F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
-        #    base = F.interpolate(x, scale_factor=self.upscale, mode='bilinear')
+        if self.upscale != 1:
+            out = self.upsampler(out)
             
         # add the nearest upsampled image, so that the network learns the residual
-        #out += base
+        base   = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
+        w_diff = base.shape[2] - out.shape[2]
+        h_diff = base.shape[3] - out.shape[3]
+        out = out + base[:, :, 
+                      w_diff//2 : base.shape[2] - w_diff//2,
+                      h_diff//2 : base.shape[3] - h_diff//2]
         
-        return out
+        return out#torch.clamp(out, 0, 1)
+        
+@ARCH_REGISTRY.register()
+class custom_compact(nn.Module):
+    """A custom VGG-style network structure for super-resolution.
+
+    It is a custom network structure, which performs upsampling in the last layer and no convolution is
+    conducted on the HR feature space.
+
+    Args:
+        num_in_ch (int): Channel number of inputs. Default: 3.
+        num_out_ch (int): Channel number of outputs. Default: 3.
+        num_feat (int): Channel number of intermediate features. Default: 64.
+        num_body (int): Number of convolution layers in the body network. Default: 16.
+        num_tail (int): Number of convolution layers in the tail network. Default: 4.
+        upscale (int): Upsampling factor. Default: 4.
+        act_type (str): Activation type, options: 'relu', 'prelu', 'leakyrelu'. Default: prelu.
+    """
+
+    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=80, num_conv=10, upscale=upscale, act_type='prelu', **kwargs):
+    
+        super(custom_compact, self).__init__()
+        self.num_in_ch = num_in_ch
+        self.num_out_ch = num_out_ch
+        self.num_feat = num_feat
+        self.num_conv = num_conv
+        self.upscale = upscale
+        self.act_type = act_type
+        self.pad_mode = "zeros"
+        self.pad_fill = False
+        self.pad_mask = False
+        
+        def get_activation(num_channels):
+            if self.act_type == 'relu':
+                activation = nn.ReLU(inplace=True)
+            elif self.act_type == 'prelu':
+                activation = nn.PReLU(num_parameters=num_channels)
+            elif self.act_type == 'leakyrelu':
+                activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            return activation
+        
+        self.total_padding = 0
+
+        self.body = nn.ModuleList()
+        # the first conv
+        #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
+        k = 1; self.total_padding += k // 2
+        nf_in  = self.num_in_ch
+        nf_out = self.num_feat
+        self.body.append(nn.Conv2d(nf_in + self.pad_mask, nf_out, k, 1, 0, padding_mode = self.pad_mode))
+        # the first activation
+        self.body.append(get_activation(nf_out))
+        
+        nf_in = nf_out
+
+        # the body structure
+        for i in range(self.num_conv):
+            #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
+            k = 5; self.total_padding += k // 2
+            nf_out = nf_in# * (2 if i > 0 and i % 2 == 0 else 1)
+            self.body.append(nn.Conv2d(nf_in + self.pad_mask, nf_out, k, 1, 0, padding_mode = self.pad_mode))
+            # activation
+            self.body.append(get_activation(nf_out))
+            nf_in = nf_out
+
+        # the last conv
+        #self.body.append(PadAndMask(1, 0.0, fill=self.pad_fill, include_mask=self.pad_mask))
+        k = 1; self.total_padding += k // 2
+        self.body.append(nn.Conv2d(nf_in + self.pad_mask, self.num_out_ch * self.upscale ** 2, k, 1, 0, padding_mode = self.pad_mode))
+        # upsample
+        self.upsampler = nn.PixelShuffle(self.upscale)
+        # padder at inference
+        self.padder = PadAndMask(self.total_padding, 0.0, True, self.pad_mask)
+
+    def forward(self, x):
+    
+        #interp = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='bilinear')
+        if self.training:
+            out = x
+        else:
+            out = self.padder(x)
+            
+        for i in range(0, len(self.body)):
+            out = self.body[i](out)
+            
+        if self.upscale != 1:
+            out = self.upsampler(out)
+            
+        # add the nearest upsampled image, so that the network learns the residual
+        base = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
+        w_diff = base.shape[2] - out.shape[2]
+        h_diff = base.shape[3] - out.shape[3]
+        #out += base
+        out += base[:, 
+                    :, 
+                    w_diff//2 : base.shape[2] - w_diff//2,
+                    h_diff//2 : base.shape[3] - h_diff//2]
+        
+        return torch.clamp(out, 0, 1)

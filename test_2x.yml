@@ -1,30 +1,34 @@
 # Results will be saved to neosr/experiments/results/
-name: 2x_realplksr
+name: 2x_span
 model_type: default
 scale: 2
-use_amp: false
+use_amp: true
 compile: false
 
 datasets:
   test_1:  
-    name: test_030
+    name: test_180
     type: single
-    dataroot_lq: 'D:\DBZ\Align\Output\VAL_LR\'
+    save_img: true
+    dataroot_lq: 'E:\DBZ_PAIRS\TEST\180\'
     io_backend:
       type: disk
 
 network_g:
-  type: realplksr
+  type: span
 
 path:
-  #pretrain_network_g: 'D:\neosr\experiments\find_loss_conv2_2_l2\models\net_g_100000.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\denoise\models\net_g_17000.pth'
+  #pretrain_network_g: 'D:\neosr\experiments\custom\models\net_g_17000.pth'
   #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_8262.pth'
   #pretrain_network_g: 'D:\neosr\experiments\archtest_compact_small\models\net_g_latest.pth'
   #pretrain_network_g: 'D:\neosr\experiments\2x_dat2\models\net_g_1345.pth'
-  pretrain_network_g: 'D:\saved_models\2x_realplksr_g.pth'
+  #pretrain_network_g: 'D:\saved_models\2x_NGE_RealPLKSR.pth'
   #pretrain_network_g: 'D:\neosr\experiments\archtest_span\models\net_g_latest.pth'
   #pretrain_network_g: 'D:\neosr\experiments\archtest_realplksr\models\net_g_latest.pth'
   #pretrain_network_g: 'D:\neosr\experiments\train_compact\models\net_g_12000.pth'
+  
+  pretrain_network_g: 'D:\saved_models\2x_span_g.pth'
   #strict_load_g: false # do not uncomment, read docs
 
 val:

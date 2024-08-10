@@ -2,7 +2,9 @@ from functools import partial
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
+from torchvision import transforms
 
 from neosr.utils.registry import ARCH_REGISTRY
 from neosr.archs.arch_util import net_opt
@@ -115,6 +117,10 @@ class realplksr(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        
+        self.upscaling_factor = upscaling_factor
+        self.normalize = transforms.Normalize(mean=[0.500, 0.500, 0.500],
+                                              std =[0.250, 0.250, 0.250])
 
         if not self.training:
             dropout = 0
@@ -126,20 +132,31 @@ class realplksr(nn.Module):
                 for _ in range(n_blocks)
             ]
             + [nn.Dropout2d(dropout)]
-            + [nn.Conv2d(dim, 3 * upscaling_factor**2, 3, 1, 1)]
+            + [nn.Conv2d(dim, 3 * self.upscaling_factor**2, 3, 1, 1)]
         )
         trunc_normal_(self.feats[0].weight, std=0.02)
         trunc_normal_(self.feats[-1].weight, std=0.02)
 
         self.repeat_op = partial(
-            torch.repeat_interleave, repeats=upscaling_factor**2, dim=1
+            torch.repeat_interleave, repeats=self.upscaling_factor**2, dim=1
         )
 
-        self.to_img = nn.PixelShuffle(upscaling_factor)
+        self.upscaler = nn.PixelShuffle(self.upscaling_factor)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.feats(x) + self.repeat_op(x)
-        return self.to_img(x)
+    
+        x_normed = self.normalize(x)
+        out      = self.feats(x_normed) + self.repeat_op(x_normed)
+        
+        if self.upscaling_factor != 1:
+            out = self.upscaler(out)
+        
+        base   = x if self.upscaling_factor == 1 else F.interpolate(x, scale_factor=self.upscaling_factor, mode='nearest-exact')
+        w_diff = base.shape[2] - out.shape[2]
+        h_diff = base.shape[3] - out.shape[3]
+        out   += base[:, :, w_diff//2 : base.shape[2] - w_diff//2, h_diff//2 : base.shape[3] - h_diff//2]
+
+        return torch.clamp(out, 0, 1)
 
 
 @ARCH_REGISTRY.register()

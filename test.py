@@ -58,7 +58,7 @@ def test_pipeline(root_path):
         end_time = time()
         total_time = end_time - start_time
         n_img = len(test_loader.dataset)
-        fps = n_img / total_time
+        fps = n_img / (1 if total_time == 0 else total_time)
         logger.info(f"Inference took {total_time:.2f} seconds, at {fps:.2f} fps.")
 
 

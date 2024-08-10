@@ -3,6 +3,7 @@ from collections import OrderedDict
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchvision import transforms
 
 from neosr.utils.registry import ARCH_REGISTRY
 from neosr.archs.arch_util import net_opt
@@ -210,7 +211,7 @@ class span(nn.Module):
                  feature_channels=48,
                  upscale=upscale,
                  bias=True,
-                 norm=False,
+                 norm=True,
                  img_range=1.0,
                  rgb_mean=(0.5, 0.5, 0.5),
                  **kwargs,
@@ -220,7 +221,8 @@ class span(nn.Module):
         in_channels = num_in_ch
         out_channels = num_out_ch
         self.img_range = img_range
-        self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+        self.upscale = upscale
+        self.mean = torch.Tensor(rgb_mean).view(1, -1, 1, 1).cuda()
 
         self.no_norm: torch.Tensor | None
         if not norm:
@@ -239,18 +241,16 @@ class span(nn.Module):
         self.conv_cat = conv_layer(feature_channels * 4, feature_channels, kernel_size=1, bias=True)
         self.conv_2 = Conv3XC(feature_channels, feature_channels, gain1=2, s=1)
 
-        self.upsampler = pixelshuffle_block(feature_channels, out_channels, upscale_factor=upscale)
+        self.upsampler = pixelshuffle_block(feature_channels, out_channels, upscale_factor=self.upscale)
 
     @property
     def is_norm(self):
         return self.no_norm is None
 
     def forward(self, x):
-        if self.is_norm:
-            self.mean = self.mean.type_as(x)
-            x = (x - self.mean) * self.img_range
-
-        out_feature = self.conv_1(x)
+    
+        x_normed = (x - self.mean) * self.img_range
+        out_feature = self.conv_1(x_normed)
 
         out_b1, _, att1 = self.block_1(out_feature)
         out_b2, _, att2 = self.block_2(out_b1)
@@ -262,6 +262,78 @@ class span(nn.Module):
 
         out_b6 = self.conv_2(out_b6)
         out = self.conv_cat(torch.cat([out_feature, out_b6, out_b1, out_b5_2], 1))
-        output = self.upsampler(out)
+        
+        if self.upscale != 1:
+            out = self.upsampler(out)
+            
+        base   = x if self.upscale == 1 else F.interpolate(x, scale_factor=self.upscale, mode='nearest-exact')
+        w_diff = base.shape[2] - out.shape[2]
+        h_diff = base.shape[3] - out.shape[3]
+        out   += base[:, :, w_diff//2 : base.shape[2] - w_diff//2, h_diff//2 : base.shape[3] - h_diff//2]
 
-        return output
+        return torch.clamp(out, 0.0, 1.0)
+        
+@ARCH_REGISTRY.register()
+class span_d(nn.Module):
+    """
+    Swift Parameter-free Attention Network for Efficient Super-Resolution
+    """
+
+    def __init__(self,
+                 num_in_ch=3,
+                 num_out_ch=3,
+                 feature_channels=48,
+                 upscale=upscale,
+                 bias=True,
+                 norm=True,
+                 img_range=1.0,
+                 rgb_mean=(0.5, 0.5, 0.5),
+                 **kwargs,
+                 ):
+        super(span_d, self).__init__()
+
+        in_channels    = num_in_ch
+        out_channels   = num_out_ch
+        self.img_range = img_range
+        self.upscale   = upscale
+        self.normalize = transforms.Normalize(mean=[0.500, 0.500, 0.500],
+                                              std =[0.250, 0.250, 0.250])
+
+        self.no_norm: torch.Tensor | None
+        if not norm:
+            self.register_buffer("no_norm", torch.zeros(1))
+        else:
+            self.no_norm = None
+
+        self.conv_1 = Conv3XC(in_channels, feature_channels, gain1=2, s=1)
+        self.block_1 = SPAB(feature_channels, bias=bias)
+        self.block_2 = SPAB(feature_channels, bias=bias)
+        self.block_3 = SPAB(feature_channels, bias=bias)
+        self.block_4 = SPAB(feature_channels, bias=bias)
+        self.block_5 = SPAB(feature_channels, bias=bias)
+        self.block_6 = SPAB(feature_channels, bias=bias)
+
+        self.conv_cat = conv_layer(feature_channels * 4, feature_channels, kernel_size=1, bias=True)
+        self.conv_2 = Conv3XC(feature_channels, feature_channels, gain1=2, s=1)
+
+    @property
+    def is_norm(self):
+        return self.no_norm is None
+
+    def forward(self, x):
+    
+        x_normed    = self.normalize(x)
+        out_feature = self.conv_1(x_normed)
+
+        out_b1, _, att1 = self.block_1(out_feature)
+        out_b2, _, att2 = self.block_2(out_b1)
+        out_b3, _, att3 = self.block_3(out_b2)
+
+        out_b4, _, att4 = self.block_4(out_b3)
+        out_b5, _, att5 = self.block_5(out_b4)
+        out_b6, out_b5_2, att6 = self.block_6(out_b5)
+
+        out_b6 = self.conv_2(out_b6)
+        out = self.conv_cat(torch.cat([out_feature, out_b6, out_b1, out_b5_2], 1))
+
+        return out

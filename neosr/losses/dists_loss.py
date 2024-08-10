@@ -7,6 +7,7 @@ from torch import nn
 from torchvision import models
 
 from neosr.utils.registry import LOSS_REGISTRY
+from DISTS_pytorch import DISTS
 
 
 class L2pooling(nn.Module):
@@ -85,12 +86,8 @@ class dists(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1,-1,1,1))
 
         self.chns = [3, 64, 128, 256, 512, 512]
-        self.register_parameter(
-            "alpha", nn.Parameter(torch.randn(1, sum(self.chns), 1, 1))
-        )
-        self.register_parameter(
-            "beta", nn.Parameter(torch.randn(1, sum(self.chns), 1, 1))
-        )
+        self.register_parameter("alpha", nn.Parameter(torch.randn(1, sum(self.chns), 1, 1)))
+        self.register_parameter("beta", nn.Parameter(torch.randn(1, sum(self.chns), 1, 1)))
         self.alpha.data.normal_(0.1, 0.01)
         self.beta.data.normal_(0.1, 0.01)
 
@@ -154,3 +151,4 @@ class dists(nn.Module):
             out = 1 - (dist1 + dist2).squeeze()
 
         return out
+        

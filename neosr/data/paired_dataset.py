@@ -5,6 +5,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils import data
 from torchvision.transforms.functional import normalize
+from torchvision.transforms import Grayscale
 
 from neosr.data.data_util import paired_paths_from_folder, paired_paths_from_lmdb
 from neosr.data.transforms import basic_augment, paired_random_crop
@@ -130,14 +131,30 @@ class paired(data.Dataset):
         # augmentation for training
         if self.opt["phase"] == "train":
             gt_size = self.opt["gt_size"]
-            flip = self.opt.get("use_hflip", True)
-            rot = self.opt.get("use_rot", True)
+            n_tiles = self.opt.get("n_tiles", 1)
+            flip    = self.opt.get("use_hflip", True)
+            rot     = self.opt.get("use_rot", True)
 
+            best_tile_gt, best_tile_lq = None, None
+            best_var = -999
             # random crop
-            img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
+            
+            for _ in range(n_tiles):
+                _img_gt, _img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
+                #gray = Grayscale(1)(_img_gt)
+                if n_tiles == 1:
+                    best_tile_lq = _img_lq
+                    best_tile_gt = _img_gt
+                else:
+                    v = _img_gt.var((0,1)).mean()
+                    if v > best_var:
+                        best_tile_lq = _img_lq
+                        best_tile_gt = _img_gt
+                        best_var     = v
+                
             # flip, rotation
             img_gt, img_lq = basic_augment(
-                [img_gt, img_lq],
+                [best_tile_gt, best_tile_lq],
                 hflip=flip,
                 rotation=rot,
             )

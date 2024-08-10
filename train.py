@@ -218,6 +218,9 @@ def train_pipeline(root_path):
     #data_timer, iter_timer = AvgTimer(), AvgTimer()
     iter_timer = AvgTimer()
     start_time = time.time()
+    st = 0
+    perf_tot = 0
+    perf_count = 0
 
     try:
         for epoch in range(start_epoch, total_epochs + 1):
@@ -228,12 +231,19 @@ def train_pipeline(root_path):
             while train_data is not None:
                 #data_timer.record()
 
+                st = time.perf_counter()
                 current_iter += 1
                 if current_iter > total_iters:
                     break
+                    
                 # training
+                
                 model.feed_data(train_data)
-                model.optimize_parameters(current_iter)
+                model.optimize_parameters(current_iter, tb_logger)
+                #perf_tot += time.perf_counter() - st
+                #perf_count += 1
+                #if current_iter % 10 == 0:
+                #    print("Time For Feed and optimize: {:.4f}".format(perf_tot / perf_count))
                 # update learning rate
                 model.update_learning_rate(
                     current_iter, warmup_iter=opt["train"].get("warmup_iter", -1)
@@ -251,6 +261,7 @@ def train_pipeline(root_path):
                     current_iter_log = current_iter
 
                 if current_iter_log % print_freq == 0:
+                    
                     log_vars = {"epoch": epoch, "iter": current_iter_log}
                     log_vars.update({"lrs": model.get_current_learning_rate()})
                     log_vars.update({
@@ -279,6 +290,11 @@ def train_pipeline(root_path):
                 #data_timer.start()
                 iter_timer.start()
                 train_data = prefetcher.next()
+                
+                #perf_tot += time.perf_counter() - st
+                #perf_count += 1
+                #if current_iter_log % 10 == 0:
+                #    print("Time For Iter {:.5f}".format(perf_tot / perf_count))
             # end of iter
 
         # end of epoch
